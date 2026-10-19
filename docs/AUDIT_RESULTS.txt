@@ -1,0 +1,12 @@
+SUMMARY
+-------
+PASS  TypeScript (backend + frontend)    5.0s     
+PASS  ESLint                             2.3s     
+PASS  Unit + reference-parity tests      3.0s     92 passed
+PASS  Independent Python parity run      1.1s     2055 cases, 14167 comparisons, 354
+PASS  Integration tests                  6.2s     48 passed
+PASS  Production build                   6.7s     
+PASS  Browser tests (Playwright)         13.9s    18 passed (12.8s)
+PASS  Dependency audit (npm audit)       0.9s     found 0 vulnerabilities
+
+8 passed, 0 failed, 0 skipped  (2026-10-19T09:08:23.117Z, Node v22.23.2, win32)

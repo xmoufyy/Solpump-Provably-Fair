@@ -37,7 +37,7 @@ const vitestCounts = (out) => {
 };
 const python = () => {
   for (const c of ["python", "python3", "py"]) {
-    const r = spawnSync(c, ["-c", "import sys;print(sys.version_info[0])"], { encoding: "utf8", shell: isWin });
+    const r = spawnSync(c, ["-c", "import sys;print(sys.version_info[0])"], { encoding: "utf8" }); // no shell: keeps -c intact
     if (r.status === 0 && r.stdout.trim() === "3") return null;
   }
   return "Python 3 not found - independent implementation not run";
