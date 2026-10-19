@@ -1,4 +1,4 @@
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -63,6 +63,16 @@ export function fingerprintOf(inputs: Record<string, unknown>): string {
   return createHash("sha256").update(canonicalJson(core)).digest("hex");
 }
 
+/**
+ * Imported rounds store only authoritative facts (outcome + details, overall, errors, audit time).
+ * Statuses live in their own columns; explanatory notes, comparison rows and the trace are
+ * deterministic presentation and are rebuilt from the inputs when the record is opened.
+ * This halves the row size (~1.9 KB -> ~0.6 KB of JSON) and import write volume.
+ */
+function compactResult(r: VerificationResult) {
+  return { compact: true, outcome: r.outcome, overall: r.overall, errors: r.errors, computedAt: r.computedAt, appVersion: r.appVersion };
+}
+
 const SUMMARY_COLUMNS =
   "id, round_id, game, algorithm_version, nonce, server_seed, client_seed, outcome_status, commitment_status, timing_status, overall_status, evidence_source, round_timestamp, audited_at, import_batch_id, recorded_json, calculated_json";
 
@@ -71,12 +81,27 @@ export class FairnessDb {
   readonly path: string;
   /** set when opening this database required a schema migration */
   readonly migration: { from: number; to: number; backup: string | null } | null = null;
+  /** incremented on every write; lets callers cache derived data (stats, integrity) safely */
+  revision = 0;
+  private statements = new Map<string, StatementSync>();
+
+  /** Prepared-statement cache: compiling SQL on every row cost ~25% of import time. */
+  private stmt(sql: string): StatementSync {
+    let s = this.statements.get(sql);
+    if (!s) {
+      s = this.db.prepare(sql);
+      this.statements.set(sql, s);
+    }
+    return s;
+  }
 
   constructor(path = process.env.SFL_DB_PATH ?? DEFAULT_PATH) {
     this.path = path;
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
-    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+    // WAL + synchronous=NORMAL: never corrupts; an application crash loses nothing; an OS crash or power loss can
+    // lose only the most recent commits. Per-commit fsync (FULL) made imports ~2x slower on Windows.
+    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
     this.db.exec(V0_SCHEMA);
     this.migration = this.migrate();
     // Jobs that were running when the process stopped can never resume; mark them honestly.
@@ -142,7 +167,7 @@ export class FairnessDb {
 
   /* ------------------------------------------------------------------ settings */
   getSettings(): Settings {
-    const rows = this.db.prepare("SELECT key, value FROM settings").all() as { key: string; value: string }[];
+    const rows = this.stmt("SELECT key, value FROM settings").all() as { key: string; value: string }[];
     const s: Record<string, unknown> = { ...DEFAULT_SETTINGS };
     for (const r of rows) if (r.key in DEFAULT_SETTINGS) s[r.key] = JSON.parse(r.value);
     return s as unknown as Settings;
@@ -156,7 +181,7 @@ export class FairnessDb {
 
   /* ------------------------------------------------------------------ rounds */
   findByFingerprint(fp: string): number | null {
-    const r = this.db.prepare("SELECT id FROM rounds WHERE fingerprint = ? LIMIT 1").get(fp) as { id: number } | undefined;
+    const r = this.stmt("SELECT id FROM rounds WHERE fingerprint = ? LIMIT 1").get(fp) as { id: number } | undefined;
     return r?.id ?? null;
   }
 
@@ -170,8 +195,9 @@ export class FairnessDb {
     const str = (v: unknown) => (typeof v === "string" ? v : v == null ? null : String(v));
     const { inputs: _i, calculated, reported, trace, ...rest } = result;
     void _i;
-    const info = this.db
-      .prepare(
+    this.revision++;
+    const info = this
+      .stmt(
         `INSERT INTO rounds (round_id, game, algorithm_version, nonce, server_seed, client_seed, outcome_status, commitment_status,
           timing_status, overall_status, evidence_source, round_timestamp, audited_at, import_batch_id, inputs_json, recorded_json,
           calculated_json, result_json, fingerprint, commitment, trace_stored) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -194,7 +220,7 @@ export class FairnessDb {
         JSON.stringify(inputs),
         reported ? JSON.stringify(reported) : null,
         calculated ? JSON.stringify(calculated) : null,
-        JSON.stringify(storeTrace ? { ...rest, trace } : rest),
+        JSON.stringify(storeTrace ? { ...rest, trace } : compactResult(result)),
         fingerprintOf(inputs),
         typeof inputs.commitment === "string" && inputs.commitment ? inputs.commitment.trim().toLowerCase() : null,
         storeTrace ? 1 : 0,
@@ -204,6 +230,7 @@ export class FairnessDb {
 
   /** Re-audit: replaces the current statuses and keeps the previous audit in previous_audits_json (never silently lost). */
   updateRoundResult(id: number, result: VerificationResult) {
+    this.revision++;
     const cur = this.db.prepare("SELECT overall_status, outcome_status, commitment_status, audited_at, result_json, previous_audits_json FROM rounds WHERE id = ?").get(id) as
       | Record<string, string>
       | undefined;
@@ -232,7 +259,7 @@ export class FairnessDb {
         result.computedAt,
         reported ? JSON.stringify(reported) : null,
         calculated ? JSON.stringify(calculated) : null,
-        JSON.stringify(storedTrace.trace_stored ? { ...rest, trace } : rest),
+        JSON.stringify(storedTrace.trace_stored ? { ...rest, trace } : compactResult(result)),
         JSON.stringify(prev),
         id,
       );
@@ -306,7 +333,18 @@ export class FairnessDb {
     const recorded = r.recorded_json ? JSON.parse(r.recorded_json as string) : null;
     const calculated = r.calculated_json ? (JSON.parse(r.calculated_json as string) as CalculatedByGame[Game]) : null;
     // v1 rows stored everything (incl. inputs/trace) inside result_json; v2 rows store them in columns.
+    const isCompact = (stored as { compact?: boolean }).compact === true;
     const result = {
+      game: summary.game,
+      roundId: summary.roundId,
+      algorithmVersion: summary.algorithmVersion,
+      ...(isCompact
+        ? {
+            commitment: { status: summary.commitmentStatus, note: "" },
+            timing: { status: summary.timingStatus, note: "" },
+            payout: null,
+          }
+        : {}),
       ...stored,
       inputs: stored.inputs ?? inputs,
       reported: stored.reported ?? recorded,
@@ -324,6 +362,7 @@ export class FairnessDb {
       previousAudits: r.previous_audits_json ? JSON.parse(r.previous_audits_json as string) : [],
       traceRegenerated: false,
       reproduced: null,
+      compact: isCompact,
     };
   }
 
@@ -335,11 +374,12 @@ export class FairnessDb {
   }
 
   getRound(id: number): StoredRound | null {
-    const r = this.db.prepare("SELECT * FROM rounds WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    const r = this.stmt("SELECT * FROM rounds WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     return r ? this.toStored(r) : null;
   }
 
   deleteRound(id: number) {
+    this.revision++;
     return Number(this.db.prepare("DELETE FROM rounds WHERE id = ?").run(id).changes);
   }
 

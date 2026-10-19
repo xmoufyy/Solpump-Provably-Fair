@@ -109,13 +109,34 @@ export async function buildApp(opts: AppOptions = {}) {
   };
   const idParam = (req: FastifyRequest) => parse(z.object({ id: z.coerce.number().int().positive() }), req.params).id;
 
-  /** Fills in the trace when it was not stored and checks that recomputation reproduces the stored outcome. */
-  const withTrace = (r: StoredRound): StoredRound => {
+  /**
+   * Opens a stored round for display/export: rebuilds anything not stored (trace, notes, comparison
+   * rows) from the inputs, checks recomputation reproduces the stored outcome, and reports when
+   * today's settings would assess it differently. Stored statuses remain authoritative.
+   */
+  const hydrate = (r: StoredRound): StoredRound => {
     if (["invalid_input", "unsupported_version"].includes(r.outcomeStatus)) return r;
     const fresh = verifyRound(r.result.inputs, verifyOpts("import", true));
     const reproduced = outcomeKey(r.game, fresh.calculated) === outcomeKey(r.game, r.calculated);
-    if (r.result.trace.length) return { ...r, reproduced };
-    return { ...r, result: { ...r.result, trace: fresh.trace }, traceRegenerated: true, reproduced };
+    const differs = fresh.overall !== r.overallStatus || fresh.outcome.status !== r.outcomeStatus || fresh.commitment.status !== r.commitmentStatus;
+    const currentAssessment = differs ? { overall: fresh.overall, outcome: fresh.outcome.status, commitment: fresh.commitment.status } : null;
+    const needsTrace = r.result.trace.length === 0;
+    const result = r.compact
+      ? {
+          ...fresh,
+          // authoritative stored facts
+          outcome: r.result.outcome,
+          overall: r.overallStatus,
+          errors: r.result.errors,
+          computedAt: r.result.computedAt,
+          appVersion: r.result.appVersion,
+          reported: r.recorded,
+          calculated: r.calculated,
+          commitment: { ...fresh.commitment, status: r.commitmentStatus },
+          timing: { ...fresh.timing, status: r.timingStatus },
+        }
+      : { ...r.result, trace: needsTrace ? fresh.trace : r.result.trace, comparisons: r.result.comparisons.length ? r.result.comparisons : fresh.comparisons };
+    return { ...r, result: result as StoredRound["result"], traceRegenerated: needsTrace, reproduced, currentAssessment };
   };
 
   // ---------------------------------------------------------------- meta
@@ -206,7 +227,7 @@ export async function buildApp(opts: AppOptions = {}) {
   app.get("/api/rounds/:id", async (req) => {
     const r = db.getRound(idParam(req));
     if (!r) throw new HttpError(404, "Not found");
-    return withTrace(r);
+    return hydrate(r);
   });
 
   app.delete("/api/rounds/:id", async (req) => ({ deleted: db.deleteRound(idParam(req)) }));
@@ -292,8 +313,21 @@ export async function buildApp(opts: AppOptions = {}) {
   app.get("/api/imports", async () => db.listImports());
 
   // ---------------------------------------------------------------- analytics
-  app.get("/api/stats", async (req) => db.stats(toFilter(parse(filterSchema, req.query))));
-  app.get("/api/integrity", async () => runIntegrityAudit(db.db));
+  // Derived views are cached until the data changes (db.revision) - repeated dashboard visits are free.
+  const cache = new Map<string, { rev: number; value: unknown }>();
+  const cached = <T>(key: string, compute: () => T): T => {
+    const hit = cache.get(key);
+    if (hit && hit.rev === db.revision) return hit.value as T;
+    const value = compute();
+    if (cache.size > 200) cache.clear();
+    cache.set(key, { rev: db.revision, value });
+    return value;
+  };
+  app.get("/api/stats", async (req) => {
+    const f = toFilter(parse(filterSchema, req.query));
+    return cached(`stats:${JSON.stringify(f)}`, () => db.stats(f));
+  });
+  app.get("/api/integrity", async () => cached("integrity", () => runIntegrityAudit(db.db)));
   app.get("/api/sessions", async (req) =>
     db.seedSessions(parse(z.object({ game: z.string().max(32).optional(), limit: z.coerce.number().int().min(1).max(500).optional(), offset: z.coerce.number().int().min(0).optional() }), req.query)),
   );
@@ -313,7 +347,7 @@ export async function buildApp(opts: AppOptions = {}) {
       throw new HttpError(413, `${total} records selected; HTML/PDF reports are limited to ${LIMITS.htmlPdfExportRounds}. Filter by game, status or import batch, or use CSV/JSON.`);
     }
     const withTraces = total <= LIMITS.jsonExportTraceRounds;
-    const rounds = [...db.iterateRounds({ ...f, limit: undefined, offset: undefined })].map((r) => (withTraces ? withTrace(r) : r));
+    const rounds = [...db.iterateRounds({ ...f, limit: undefined, offset: undefined })].map((r) => (withTraces ? hydrate(r) : r));
     if (q.format === "json") return reply.type("application/json; charset=utf-8").send(toJson(rounds, withTraces));
     if (q.format === "html") {
       // the report is static: no scripts may run in it even if opened from this origin

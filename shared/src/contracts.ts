@@ -196,6 +196,10 @@ export interface StoredRound extends RoundSummary {
   traceRegenerated: boolean;
   /** recomputation from stored inputs reproduced the stored calculated outcome exactly */
   reproduced: boolean | null;
+  /** stored without notes/comparisons/trace (imports); rebuilt from inputs when opened */
+  compact?: boolean;
+  /** present when today's settings would assess this record differently (e.g. commitment scheme confirmed since) */
+  currentAssessment?: { overall: OverallStatus; outcome: OutcomeStatus; commitment: CommitmentStatus } | null;
 }
 
 export interface Stats {

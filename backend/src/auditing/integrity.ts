@@ -152,11 +152,14 @@ export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
   // 7. Server-seed rotation without any recorded commitment for the new seed
   const rot = db
     .prepare(
-      `SELECT COUNT(*) AS n, group_concat(id) AS ids FROM (
+      // committed seeds are materialised once (a correlated NOT EXISTS here was O(n^2): 263 s at 10k rows)
+      `WITH committed AS MATERIALIZED (SELECT DISTINCT server_seed FROM rounds WHERE commitment IS NOT NULL),
+       cur AS (
          SELECT id, server_seed, LAG(server_seed) OVER (PARTITION BY game, client_seed ORDER BY round_timestamp, id) AS prev
          FROM rounds WHERE round_timestamp IS NOT NULL AND server_seed IS NOT NULL AND client_seed IS NOT NULL
-       ) cur WHERE prev IS NOT NULL AND prev <> server_seed
-         AND NOT EXISTS (SELECT 1 FROM rounds r2 WHERE r2.server_seed = cur.server_seed AND r2.commitment IS NOT NULL)`,
+       )
+       SELECT COUNT(*) AS n, group_concat(id) AS ids FROM cur
+       WHERE prev IS NOT NULL AND prev <> server_seed AND server_seed NOT IN (SELECT server_seed FROM committed)`,
     )
     .get() as { n: number; ids: string | null };
   if (rot.n) {
@@ -171,55 +174,64 @@ export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
     });
   }
 
-  // 8-12. status-based findings
-  const statusFinding = (where: string, f: { check: string; kind: FindingKind; severity: IntegrityFinding["severity"]; title: (n: number) => string; detail: string }) => {
-    const r = db.prepare(`SELECT COUNT(*) AS n, (SELECT group_concat(id) FROM (SELECT id FROM rounds WHERE ${where} ORDER BY id LIMIT ${MAX_IDS})) AS ids FROM rounds WHERE ${where}`).get() as {
-      n: number;
-      ids: string | null;
-    };
-    if (r.n) add({ check: f.check, kind: f.kind, severity: f.severity, title: f.title(r.n), detail: f.detail, idList: r.ids, total: r.n });
-  };
-  statusFinding("commitment_status = 'mismatch'", {
-    check: "commitment_mismatch",
-    kind: "contradiction",
-    severity: "attention",
-    title: (n) => `${n} record(s) whose revealed seed does not match the supplied commitment`,
-    detail: "Under the commitment scheme confirmed in Settings, the revealed server seed does not hash to the supplied commitment.",
-  });
-  statusFinding("outcome_status = 'mismatch'", {
-    check: "outcome_mismatch",
-    kind: "contradiction",
-    severity: "attention",
-    title: (n) => `${n} record(s) whose recorded outcome differs from the reconstruction`,
-    detail: "First confirm the algorithm version, seeds, nonce and game settings were recorded correctly; transcription errors are the most common cause.",
-  });
-  statusFinding("server_seed IS NULL OR server_seed = ''", {
-    check: "missing_reveal",
-    kind: "data_quality",
-    severity: "warning",
-    title: (n) => `${n} record(s) without a revealed server seed`,
-    detail: "Nothing can be reconstructed until the server seed is revealed (usually after rotating seeds).",
-  });
-  statusFinding("outcome_status IN ('invalid_input','unsupported_version') AND server_seed IS NOT NULL AND server_seed <> ''", {
-    check: "invalid_records",
-    kind: "data_quality",
-    severity: "warning",
-    title: (n) => `${n} record(s) with invalid game parameters or unsupported versions`,
-    detail: "Open a record to see which field was rejected (e.g. mine count outside the grid, unknown difficulty).",
-  });
-  statusFinding("commitment_status = 'not_supplied' AND outcome_status NOT IN ('invalid_input','unsupported_version')", {
-    check: "missing_commitment",
-    kind: "data_quality",
-    severity: "info",
-    title: (n) => `${n} record(s) without a commitment hash`,
-    detail: "Without the server-seed hash shown before play, the record cannot show the seed was fixed in advance.",
-  });
-  statusFinding("evidence_source IS NULL OR evidence_source = ''", {
-    check: "missing_source",
-    kind: "data_quality",
-    severity: "info",
-    title: (n) => `${n} record(s) without an evidence source`,
-    detail: "Records without a source (e.g. 'Solpump history export', 'screenshot', 'on-chain tx') are harder to audit later.",
+  // 8-13. status-based findings, computed in ONE table scan (six separate scans cost ~3.4 s at 100k rows)
+  const STATUS_CHECKS: { cond: string; check: string; kind: FindingKind; severity: IntegrityFinding["severity"]; title: (n: number) => string; detail: string }[] = [
+    {
+      cond: "commitment_status = 'mismatch'",
+      check: "commitment_mismatch",
+      kind: "contradiction",
+      severity: "attention",
+      title: (n) => `${n} record(s) whose revealed seed does not match the supplied commitment`,
+      detail: "Under the commitment scheme confirmed in Settings, the revealed server seed does not hash to the supplied commitment.",
+    },
+    {
+      cond: "outcome_status = 'mismatch'",
+      check: "outcome_mismatch",
+      kind: "contradiction",
+      severity: "attention",
+      title: (n) => `${n} record(s) whose recorded outcome differs from the reconstruction`,
+      detail: "First confirm the algorithm version, seeds, nonce and game settings were recorded correctly; transcription errors are the most common cause.",
+    },
+    {
+      cond: "server_seed IS NULL OR server_seed = ''",
+      check: "missing_reveal",
+      kind: "data_quality",
+      severity: "warning",
+      title: (n) => `${n} record(s) without a revealed server seed`,
+      detail: "Nothing can be reconstructed until the server seed is revealed (usually after rotating seeds).",
+    },
+    {
+      cond: "outcome_status IN ('invalid_input','unsupported_version') AND server_seed IS NOT NULL AND server_seed <> ''",
+      check: "invalid_records",
+      kind: "data_quality",
+      severity: "warning",
+      title: (n) => `${n} record(s) with invalid game parameters or unsupported versions`,
+      detail: "Open a record to see which field was rejected (e.g. mine count outside the grid, unknown difficulty).",
+    },
+    {
+      cond: "commitment_status = 'not_supplied' AND outcome_status NOT IN ('invalid_input','unsupported_version')",
+      check: "missing_commitment",
+      kind: "data_quality",
+      severity: "info",
+      title: (n) => `${n} record(s) without a commitment hash`,
+      detail: "Without the server-seed hash shown before play, the record cannot show the seed was fixed in advance.",
+    },
+    {
+      cond: "evidence_source IS NULL OR evidence_source = ''",
+      check: "missing_source",
+      kind: "data_quality",
+      severity: "info",
+      title: (n) => `${n} record(s) without an evidence source`,
+      detail: "Records without a source (e.g. 'Solpump history export', 'screenshot', 'on-chain tx') are harder to audit later.",
+    },
+  ];
+  const cols = STATUS_CHECKS.map((c, i) => `SUM(CASE WHEN ${c.cond} THEN 1 ELSE 0 END) AS n${i}, group_concat(CASE WHEN ${c.cond} THEN id END) AS ids${i}`).join(", ");
+  const row = db.prepare(`SELECT ${cols} FROM rounds`).get() as Record<string, number | string | null>;
+  STATUS_CHECKS.forEach((c, i) => {
+    const n = Number(row[`n${i}`] ?? 0);
+    if (!n) return;
+    const idList = String(row[`ids${i}`] ?? "").split(",").map(Number).sort((a, b) => a - b).slice(0, MAX_IDS).join(",");
+    add({ check: c.check, kind: c.kind, severity: c.severity, title: c.title(n), detail: c.detail, idList, total: n });
   });
 
   const order: Record<FindingKind, number> = { contradiction: 0, anomaly: 1, data_quality: 2 };
