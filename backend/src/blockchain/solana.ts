@@ -25,6 +25,19 @@ export interface TxEvidence {
 
 const MAX_RPC_BYTES = 8 * 1024 * 1024;
 
+/** The parts of a getTransaction (jsonParsed) response we read. Everything is optional: the RPC is untrusted. */
+interface RpcInstruction {
+  programId?: unknown;
+  parsed?: unknown;
+  data?: unknown;
+}
+interface RpcTransaction {
+  slot?: unknown;
+  blockTime?: unknown;
+  meta?: { err?: unknown; logMessages?: unknown; innerInstructions?: { instructions?: RpcInstruction[] }[] };
+  transaction?: { message?: { instructions?: RpcInstruction[] } };
+}
+
 async function readCapped(res: Response, max: number): Promise<string> {
   const declared = Number(res.headers.get("content-length") ?? 0);
   if (declared > max) throw new Error(`RPC response too large (${declared} bytes; limit ${max})`);
@@ -71,7 +84,7 @@ export async function fetchTransactionEvidence(rpcUrl: string, signature: string
   });
   if (!res.ok) throw new Error(`RPC HTTP ${res.status}`);
   // The RPC endpoint is untrusted: cap the response size before parsing it.
-  const body = JSON.parse(await readCapped(res, MAX_RPC_BYTES)) as { result?: any; error?: { message: string } };
+  const body = JSON.parse(await readCapped(res, MAX_RPC_BYTES)) as { result?: RpcTransaction | null; error?: { message?: unknown } };
   if (body.error) throw new Error(`RPC error: ${String(body.error.message).slice(0, 300)}`);
 
   const caveat =
@@ -82,13 +95,14 @@ export async function fetchTransactionEvidence(rpcUrl: string, signature: string
     return { signature, found: false, slot: null, blockTime: null, blockTimeIso: null, err: null, programIds: [], logMessages: [], memos: [], searches: needles.map((n) => ({ needle: n, foundIn: [] })), caveat };
   }
 
-  const instructions: any[] = [
-    ...(tx.transaction?.message?.instructions ?? []),
-    ...((tx.meta?.innerInstructions ?? []) as any[]).flatMap((ii) => ii.instructions ?? []),
+  const list = <T>(v: T[] | undefined): T[] => (Array.isArray(v) ? v : []);
+  const instructions: RpcInstruction[] = [
+    ...list(tx.transaction?.message?.instructions),
+    ...list(tx.meta?.innerInstructions).flatMap((ii) => list(ii?.instructions)),
   ];
-  const programIds = [...new Set(instructions.map((i) => i.programId).filter(Boolean))] as string[];
+  const programIds = [...new Set(instructions.map((i) => i?.programId).filter((p): p is string => typeof p === "string"))];
   const memos = instructions
-    .filter((i) => MEMO_PROGRAMS.has(i.programId))
+    .filter((i) => typeof i?.programId === "string" && MEMO_PROGRAMS.has(i.programId))
     .map((i) => (typeof i.parsed === "string" ? i.parsed : JSON.stringify(i.parsed ?? i.data)));
   const logMessages: string[] = (Array.isArray(tx.meta?.logMessages) ? tx.meta.logMessages : []).slice(0, 500).map((l: unknown) => String(l).slice(0, 2000));
   const rawJson = JSON.stringify(tx);
@@ -112,9 +126,9 @@ export async function fetchTransactionEvidence(rpcUrl: string, signature: string
   return {
     signature,
     found: true,
-    slot: tx.slot ?? null,
-    blockTime: tx.blockTime ?? null,
-    blockTimeIso: tx.blockTime ? new Date(tx.blockTime * 1000).toISOString() : null,
+    slot: typeof tx.slot === "number" ? tx.slot : null,
+    blockTime: typeof tx.blockTime === "number" ? tx.blockTime : null,
+    blockTimeIso: typeof tx.blockTime === "number" ? new Date(tx.blockTime * 1000).toISOString() : null,
     err: tx.meta?.err ?? null,
     programIds,
     logMessages,

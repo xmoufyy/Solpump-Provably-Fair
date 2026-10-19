@@ -7,9 +7,12 @@ import { cn } from "@/lib/utils";
 
 const CSV_TEMPLATE = "round_id,game,algorithm_version,server_seed,client_seed,nonce,difficulty,selected_numbers,grid_size,mine_count,clicked_tiles,index_base,card_count,reported_outcome,commitment,timestamp,source";
 const MAX_BYTES = 50 * 1024 * 1024;
+/** Files larger than this are kept out of the textarea: rendering megabytes into a controlled textarea freezes the page. */
+const INLINE_LIMIT = 200_000;
 
 export function BatchPage() {
   const [text, setText] = useState("");
+  const [fileText, setFileText] = useState<string | null>(null);
   const [format, setFormat] = useState<"auto" | "csv" | "json" | "jsonl">("auto");
   const [filename, setFilename] = useState<string | undefined>();
   const [skipDuplicates, setSkipDuplicates] = useState(true);
@@ -45,7 +48,14 @@ export function BatchPage() {
     if (!f) return;
     if (f.size > MAX_BYTES) return setError(`${f.name} is ${(f.size / 1e6).toFixed(1)} MB; the limit is 50 MB per import — split the file.`);
     setFilename(f.name);
-    setText(await f.text());
+    const content = await f.text();
+    if (content.length > INLINE_LIMIT) {
+      setFileText(content);
+      setText("");
+    } else {
+      setFileText(null);
+      setText(content);
+    }
     const ext = f.name.split(".").pop()?.toLowerCase();
     if (ext === "csv" || ext === "json" || ext === "jsonl") setFormat(ext);
   };
@@ -54,7 +64,7 @@ export function BatchPage() {
     setError(null);
     setReaudit(null);
     try {
-      const { job } = await api.startImport(text, format, filename, skipDuplicates);
+      const { job } = await api.startImport(fileText ?? text, format, filename, skipDuplicates);
       setJob(job);
       poll(job.id);
     } catch (e) {
@@ -103,11 +113,21 @@ export function BatchPage() {
                 Skip rounds already in the database
               </label>
             </div>
-            <Textarea rows={14} aria-label="Data to import" value={text} onChange={(e) => setText(e.target.value)} placeholder={`Paste CSV / JSON / JSONL here.\n\n${CSV_TEMPLATE}`} data-testid="import-text" />
+            {fileText !== null ? (
+              <div className="rounded-lg border border-line bg-bg p-4 text-sm" data-testid="file-summary">
+                <div className="font-medium">{filename}</div>
+                <div className="text-muted">
+                  {(fileText.length / 1e6).toFixed(2)} MB · {(fileText.match(/\n/g)?.length ?? 0).toLocaleString()} lines · kept out of the editor for speed
+                </div>
+                <pre className="mt-2 max-h-24 overflow-hidden font-mono text-xs text-muted">{fileText.slice(0, 600)}</pre>
+              </div>
+            ) : (
+              <Textarea rows={14} aria-label="Data to import" value={text} onChange={(e) => setText(e.target.value)} placeholder={`Paste CSV / JSON / JSONL here.\n\n${CSV_TEMPLATE}`} data-testid="import-text" />
+            )}
             <div className="flex flex-wrap gap-2">
-              <Button onClick={start} disabled={!text || !!active} data-testid="import-button">Import &amp; verify</Button>
-              <Button variant="secondary" onClick={() => (setText(""), setFilename(undefined))} disabled={!!active}>Clear</Button>
-              <span className="self-center text-xs text-muted">{(text.length / 1e6).toFixed(2)} MB of 50 MB</span>
+              <Button onClick={start} disabled={(!text && fileText === null) || !!active} data-testid="import-button">Import &amp; verify</Button>
+              <Button variant="secondary" onClick={() => (setText(""), setFileText(null), setFilename(undefined))} disabled={!!active}>Clear</Button>
+              <span className="self-center text-xs text-muted">{((fileText ?? text).length / 1e6).toFixed(2)} MB of 50 MB</span>
             </div>
             {error && <p className="text-sm text-bad" role="alert">{error}</p>}
           </CardContent>

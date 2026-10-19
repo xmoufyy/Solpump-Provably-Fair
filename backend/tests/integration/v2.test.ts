@@ -20,8 +20,6 @@ const V1_FIXTURE = join(repoRoot, "fixtures/db/v1-schema0.db");
 const tmp = mkdtempSync(join(tmpdir(), "sfl-v2-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
-const S = "SERVER_TEST_2026", C = "CLIENT_TEST_2026";
-
 async function fresh(name: string) {
   return buildApp({ db: new FairnessDb(join(tmp, `${name}.db`)) });
 }

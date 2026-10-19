@@ -272,17 +272,25 @@ export class FairnessDb {
   private where(f: RoundFilter): { clause: string; params: SQLInputValue[] } {
     const where: string[] = [];
     const params: SQLInputValue[] = [];
-    if (f.game) (where.push("game = ?"), params.push(f.game));
-    if (f.status) (where.push("overall_status = ?"), params.push(f.status));
-    if (f.outcome) (where.push("outcome_status = ?"), params.push(f.outcome));
-    if (f.batch) (where.push("import_batch_id = ?"), params.push(f.batch));
+    const eq = (column: string, value: string | undefined) => {
+      if (!value) return;
+      where.push(`${column} = ?`);
+      params.push(value);
+    };
+    eq("game", f.game);
+    eq("overall_status", f.status);
+    eq("outcome_status", f.outcome);
+    eq("import_batch_id", f.batch);
     if (f.q) {
       // LIKE metacharacters in the user's text are literal (audit S-04)
       const like = `%${f.q.replace(/[\\%_]/g, (c) => "\\" + c)}%`;
       where.push("(round_id LIKE ? ESCAPE '\\' OR server_seed LIKE ? ESCAPE '\\' OR client_seed LIKE ? ESCAPE '\\' OR nonce LIKE ? ESCAPE '\\' OR evidence_source LIKE ? ESCAPE '\\')");
       params.push(like, like, like, like, like);
     }
-    if (f.ids?.length) (where.push(`id IN (${f.ids.map(() => "?").join(",")})`), params.push(...f.ids));
+    if (f.ids?.length) {
+      where.push(`id IN (${f.ids.map(() => "?").join(",")})`);
+      params.push(...f.ids);
+    }
     return { clause: where.length ? `WHERE ${where.join(" AND ")}` : "", params };
   }
 

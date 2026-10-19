@@ -37,7 +37,7 @@ test("Blackjack card 1 is the King of Clubs", async ({ page }) => {
   await expect(page.getByTestId("card-1")).toHaveAttribute("data-card", "K-clubs");
   await expect(page.locator('[data-testid^="card-"][data-card]')).toHaveCount(6);
   await expect(page.getByTestId("outcome-status")).toContainText("Match");
-  await expect(page.getByTestId("overall-status")).toContainText("Result matches, commitment unproven");
+  await expect(page.getByTestId("overall-status")).toContainText("Result matches, commitment timing unproven");
 });
 
 test("Keno: 5 difficulties, board sizes, 1–10 picks and the fixture draw", async ({ page }) => {
@@ -139,6 +139,7 @@ test("Batch import keeps good rows, reports bad rows; dashboard and integrity up
   await page.getByTestId("import-button").click();
   const res = page.getByTestId("import-result");
   await expect(res).toContainText("4 stored");
+  await expect(page.getByTestId("job-status")).toHaveText("completed");
   await expect(res).toContainText("1 rejected");
   await expect(res).toContainText("Mismatch");
   await expect(res).toContainText("Invalid input");
