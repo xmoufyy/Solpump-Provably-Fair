@@ -1,22 +1,24 @@
-export type Game = "crash" | "blackjack" | "keno" | "mines";
-export const GAMES: Game[] = ["crash", "blackjack", "keno", "mines"];
-export type AlgorithmVersion = "hmac_sha256_v2" | "seedrandom_v1";
-export const ALGORITHM_VERSIONS: AlgorithmVersion[] = ["hmac_sha256_v2", "seedrandom_v1"];
+export {
+  ALGORITHM_VERSIONS,
+  BLACKJACK_VERSION,
+  CRASH_VERSION,
+  GAMES,
+  type AlgorithmVersion,
+  type Game,
+  type TraceStep,
+} from "../../shared/src/contracts.js";
+import type { TraceStep } from "../../shared/src/contracts.js";
 
-/** Crash and Blackjack each have exactly one published algorithm. */
-export const CRASH_VERSION = "crash_hmac_sha256_v1" as const;
-export const BLACKJACK_VERSION = "blackjack_hmac_sha256_card_v1" as const;
-
-export interface TraceStep {
-  section: string;
-  label: string;
-  value: string;
-  note?: string;
-}
-
+/**
+ * Collects human-readable calculation steps. When disabled (batch imports) every
+ * add() is a no-op so no strings are built; the trace can be regenerated later
+ * from the stored inputs because every algorithm is deterministic.
+ */
 export class Trace {
-  steps: TraceStep[] = [];
+  readonly steps: TraceStep[] = [];
+  constructor(readonly enabled = true) {}
   add(section: string, label: string, value: unknown, note?: string) {
+    if (!this.enabled) return this;
     this.steps.push({
       section,
       label,
@@ -25,4 +27,9 @@ export class Trace {
     });
     return this;
   }
+}
+
+export interface ComputeOptions {
+  /** build the human-readable trace (default true) */
+  trace?: boolean;
 }

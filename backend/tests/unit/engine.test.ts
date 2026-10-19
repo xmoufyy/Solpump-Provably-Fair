@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { verifyRound } from "../src/verification/engine.js";
-import { sha256Hex } from "../src/crypto/hmac.js";
+import { verifyRound } from "../../src/verification/engine.js";
+import { sha256Hex } from "../../src/crypto/hmac.js";
 
 const manual = { commitmentScheme: "unconfirmed" as const, mode: "manual" as const };
 const confirmed = { commitmentScheme: "sha256_utf8_hex" as const, mode: "manual" as const };

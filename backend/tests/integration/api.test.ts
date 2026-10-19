@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { buildApp } from "../src/api/app.js";
-import { FairnessDb } from "../src/database/db.js";
+import { buildApp } from "../../src/api/app.js";
+import { FairnessDb } from "../../src/database/db.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -108,7 +108,7 @@ describe("API integration", () => {
 
   it("synthetic sample import (built from the reference implementation) verifies with exactly the 2 planted mismatches", async () => {
     const { readFileSync } = await import("node:fs");
-    const text = readFileSync(new URL("../../fixtures/sample-import-synthetic.csv", import.meta.url), "utf8");
+    const text = readFileSync(new URL("../../../fixtures/sample-import-synthetic.csv", import.meta.url), "utf8");
     const body = (await ctx.app.inject({ method: "POST", url: "/api/import", payload: { text, format: "csv" } })).json();
     expect(body.rejected).toEqual([]);
     expect(body.stored).toHaveLength(27);

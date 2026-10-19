@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { computeCrash } from "../src/games/crash.js";
-import { generateCard } from "../src/games/blackjack.js";
-import { computeKeno } from "../src/games/keno.js";
-import { computeMines } from "../src/games/mines.js";
-import { encodePart } from "../src/crypto/transcript.js";
-import * as ref from "../../tests/reference-parity/reference/official.mjs";
+import { computeCrash } from "../../src/games/crash.js";
+import { generateCard } from "../../src/games/blackjack.js";
+import { computeKeno } from "../../src/games/keno.js";
+import { computeMines } from "../../src/games/mines.js";
+import { encodePart } from "../../src/crypto/transcript.js";
+import * as ref from "../../../tests/reference-parity/reference/official.mjs";
 
-const fx = JSON.parse(readFileSync(new URL("../../fixtures/synthetic-test-vectors.json", import.meta.url), "utf8"));
+const fx = JSON.parse(readFileSync(new URL("../../../fixtures/synthetic-test-vectors.json", import.meta.url), "utf8"));
 const { serverSeed, clientSeed, nonce } = fx.inputs;
 
 describe("supplied synthetic test vectors", () => {
@@ -45,7 +45,7 @@ describe("encoding known answers (hand-derived)", () => {
   });
 
   it("RFC 4231 test case 2 HMAC-SHA256 (sanity check of the primitive)", async () => {
-    const { hmacSha256Hex } = await import("../src/crypto/hmac.js");
+    const { hmacSha256Hex } = await import("../../src/crypto/hmac.js");
     expect(hmacSha256Hex("Jefe", "what do ya want for nothing?")).toBe(
       "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
     );

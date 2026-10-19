@@ -1,0 +1,6 @@
+{
+  "name": "@sfl/shared",
+  "private": true,
+  "type": "module",
+  "description": "Types, limits, labels and pure parsers shared by the backend and frontend. No Node or DOM dependencies."
+}

@@ -1,0 +1,78 @@
+/** Pure text parsers used by both the importer (backend) and the forms (frontend). */
+import type { Card } from "./contracts.js";
+
+/** Parses "1, 2 3;4|5" into integers. Fails on the first token that is not a whole number. */
+export function parseIntList(text: string): { values: number[]; error: string | null } {
+  const tokens = text.split(/[\s,;|]+/).filter(Boolean);
+  const values: number[] = [];
+  for (const t of tokens) {
+    if (!/^-?\d+$/.test(t)) return { values: [], error: `"${t}" is not a whole number` };
+    const n = Number(t);
+    if (!Number.isSafeInteger(n)) return { values: [], error: `"${t}" is out of range` };
+    values.push(n);
+  }
+  return { values, error: null };
+}
+
+const SUITS: Record<string, string> = {
+  h: "hearts", heart: "hearts", hearts: "hearts", "♥": "hearts", "♡": "hearts",
+  d: "diamonds", diamond: "diamonds", diamonds: "diamonds", "♦": "diamonds", "♢": "diamonds",
+  c: "clubs", club: "clubs", clubs: "clubs", "♣": "clubs", "♧": "clubs",
+  s: "spades", spade: "spades", spades: "spades", "♠": "spades", "♤": "spades",
+};
+const RANKS: Record<string, string> = {
+  "2": "2", "3": "3", "4": "4", "5": "5", "6": "6", "7": "7", "8": "8", "9": "9", "10": "10", t: "10",
+  j: "J", jack: "J", q: "Q", queen: "Q", k: "K", king: "K", a: "A", ace: "A",
+};
+const CARD_RE = /^(10|[2-9tjqka]|jack|queen|king|ace)\s*([♠-♧]|hearts?|diamonds?|clubs?|spades?|[hdcs])$/u;
+
+/** Parses one card such as "K♣", "Kc", "10H", "King of Clubs", "k clubs". */
+export function parseCard(token: string): Card | null {
+  const m = token.trim().toLowerCase().replace(/\s+of\s+/, " ").match(CARD_RE);
+  if (!m) return null;
+  const label = RANKS[m[1]];
+  const suit = SUITS[m[2]];
+  return label && suit ? { label, suit } : null;
+}
+
+/** Comma / semicolon / newline / pipe separated, or whitespace separated ("KC 7H AS"). */
+export function parseCardList(text: string): { cards: Card[]; errors: string[] } {
+  const tokens = text.split(/[,;\n|]+/).map((s) => s.trim()).filter(Boolean);
+  const cards: Card[] = [];
+  const errors: string[] = [];
+  tokens.forEach((tok, i) => {
+    const c = parseCard(tok);
+    if (c) return void cards.push(c);
+    const parts = tok.split(/\s+/).map(parseCard);
+    if (parts.length > 1 && parts.every((p): p is Card => p !== null)) cards.push(...parts);
+    else errors.push(`Card #${i + 1} "${tok}" could not be parsed (use e.g. K♣, Kc, 10h, Ace of spades)`);
+  });
+  return { cards, errors };
+}
+
+export const SUIT_SYMBOL: Record<string, string> = { hearts: "♥", diamonds: "♦", clubs: "♣", spades: "♠" };
+
+export function summarizeOutcome(game: string, o: unknown): string {
+  if (!o || typeof o !== "object") return "";
+  const v = o as Record<string, unknown>;
+  switch (game) {
+    case "crash":
+      return typeof v.multiplier === "number" ? `${v.multiplier.toFixed(2)}x` : "";
+    case "blackjack": {
+      const cards = v.cards as Card[] | undefined;
+      return cards ? cards.map((c) => `${c.label}${c.suit[0].toUpperCase()}`).join(" ") : "";
+    }
+    case "keno": {
+      const list = (v.drawn ?? v.draw) as number[] | undefined;
+      return Array.isArray(list) ? list.join(" ") : "";
+    }
+    case "mines": {
+      const parts: string[] = [];
+      if (Array.isArray(v.mines)) parts.push(`mines ${(v.mines as number[]).join(" ")}`);
+      const res = v.outcome ?? v.derivedOutcome;
+      if (res) parts.push(String(res));
+      return parts.join(" / ");
+    }
+  }
+  return "";
+}
