@@ -1,0 +1,101 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #111015;
+  --color-panel: #19171f;
+  --color-panel-2: #211e29;
+  --color-tile: #2a2634;
+  --color-tile-hi: #353042;
+  --color-line: #322d3e;
+  --color-muted: #9c94ad;
+  --color-fg: #ece8f4;
+  --color-accent: #8b5cf6;
+  --color-accent-2: #a78bfa;
+  --color-ok: #34d399;
+  --color-bad: #f87171;
+  --color-warn: #fbbf24;
+  --color-info: #60a5fa;
+  --font-sans: "Inter", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Raised tile effect used by the Keno and Mines boards */
+.tile {
+  background: linear-gradient(180deg, var(--color-tile-hi) 0%, var(--color-tile) 100%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.06),
+    0 3px 0 #17141d;
+  transition:
+    transform 120ms ease,
+    background 150ms ease,
+    box-shadow 150ms ease;
+}
+.tile:hover:not(:disabled) {
+  transform: translateY(-1px);
+  filter: brightness(1.18);
+}
+.tile:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04), 0 1px 0 #17141d;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #3a3448;
+  border-radius: 8px;
+}
+
+.grid-bg {
+  background-image: radial-gradient(rgb(139 92 246 / 0.08) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+/* Tile states (background-image gradient on .tile must be replaced, not tinted) */
+.tile[data-state="picked"] {
+  background: linear-gradient(180deg, #9d75fa 0%, #7c4ef0 100%);
+  color: #fff;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.25), 0 3px 0 #5b3aa8;
+}
+.tile[data-state="win"] {
+  background: linear-gradient(180deg, #21403d 0%, #1a3431 100%);
+  color: var(--color-ok);
+  box-shadow: inset 0 0 0 2px rgb(52 211 153 / 0.55), 0 3px 0 #17141d;
+}
+.tile[data-state="match"] {
+  background: linear-gradient(180deg, #5eead4 0%, #34d399 100%);
+  color: #052e22;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.4), 0 3px 0 #0f7a55, 0 0 18px rgb(52 211 153 / 0.45);
+}
+.tile[data-reported-only="true"] {
+  box-shadow: inset 0 0 0 2px var(--color-bad), 0 3px 0 #17141d;
+}
+.tile[data-reveal="mine"] {
+  background: linear-gradient(180deg, #4a2230 0%, #36182a 100%);
+  box-shadow: inset 0 0 0 2px rgb(248 113 113 / 0.6), 0 3px 0 #17141d;
+}
+.tile[data-reveal="safe"] {
+  background: linear-gradient(180deg, #1f3a35 0%, #18302c 100%);
+}
+.tile[data-diff="true"] {
+  box-shadow: inset 0 0 0 3px var(--color-warn), 0 3px 0 #17141d;
+}

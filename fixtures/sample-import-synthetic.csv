@@ -1,0 +1,28 @@
+round_id,game,algorithm_version,server_seed,client_seed,nonce,difficulty,selected_numbers,grid_size,mine_count,clicked_tiles,index_base,card_count,reported_outcome,commitment,timestamp,source
+crash-1,crash,,crash-server-1,public-seed-1,,,,,,,,,4.13,,2026-10-01T12:00:00Z,SYNTHETIC sample
+crash-2,crash,,crash-server-2,public-seed-2,,,,,,,,,1.06,,2026-10-02T12:00:00Z,SYNTHETIC sample
+crash-3,crash,,crash-server-3,public-seed-3,,,,,,,,,1.00,,2026-10-03T12:00:00Z,SYNTHETIC sample
+crash-4,crash,,crash-server-4,public-seed-4,,,,,,,,,6.01,,2026-10-04T12:00:00Z,SYNTHETIC sample
+crash-5,crash,,crash-server-5,public-seed-5,,,,,,,,,6.46,,2026-10-05T12:00:00Z,SYNTHETIC sample
+crash-6,crash,,crash-server-6,public-seed-6,,,,,,,,,2.00,,2026-10-06T12:00:00Z,SYNTHETIC sample
+bj-1,blackjack,,bj-server-1,bj-client-1,,,,,,,,6,AH 5H 8D 5S 9D 5D,,2026-10-03T12:00:00Z,SYNTHETIC sample
+keno-1,keno,hmac_sha256_v2,synthetic-server-seed-A,synthetic-client-seed,1,CLASSIC,3 7 12 19 27,,,,,,16 18 32 24 20 17 2 27 38 8,,2026-10-01T12:00:00Z,SYNTHETIC sample
+keno-2,keno,hmac_sha256_v2,synthetic-server-seed-A,synthetic-client-seed,2,LOW,3 7 12 19 27,,,,,,23 18 19 5 40 3 10 11 20 21,,2026-10-02T12:00:00Z,SYNTHETIC sample
+keno-3,keno,hmac_sha256_v2,synthetic-server-seed-A,synthetic-client-seed,3,MEDIUM,3 7 12 19 27,,,,,,14 2 23 13 34 8 5 35 16 39,,2026-10-03T12:00:00Z,SYNTHETIC sample
+keno-4,keno,hmac_sha256_v2,synthetic-server-seed-A,synthetic-client-seed,4,HIGH,3 7 12 19 27,,,,,,31 24 40 22 34 18 9 7 6 20,,2026-10-04T12:00:00Z,SYNTHETIC sample
+keno-5,keno,hmac_sha256_v2,synthetic-server-seed-A,synthetic-client-seed,5,EXTREME,3 7 12 19 27,,,,,,33 37 53 7 23 16 28 18 30 44,,2026-10-05T12:00:00Z,SYNTHETIC sample
+mines-6,mines,hmac_sha256_v2,synthetic-server-seed-A,synthetic-client-seed,6,,,3,4,,0,,0 1 3 8,,2026-10-06T12:00:00Z,SYNTHETIC sample
+mines-7,mines,hmac_sha256_v2,synthetic-server-seed-A,synthetic-client-seed,7,,,5,6,,0,,22 8 7 1 5 18,,2026-10-07T12:00:00Z,SYNTHETIC sample
+mines-8,mines,hmac_sha256_v2,synthetic-server-seed-A,synthetic-client-seed,8,,,6,7,,0,,9 24 19 26 5 17 1,,2026-10-08T12:00:00Z,SYNTHETIC sample
+mines-9,mines,hmac_sha256_v2,synthetic-server-seed-A,synthetic-client-seed,9,,,7,8,,0,,19 21 13 46 47 26 16 2,,2026-10-09T12:00:00Z,SYNTHETIC sample
+mines-10,mines,hmac_sha256_v2,synthetic-server-seed-A,synthetic-client-seed,10,,,8,9,,0,,58 10 25 1 33 9 45 30 11,,2026-10-10T12:00:00Z,SYNTHETIC sample
+keno-11,keno,seedrandom_v1,synthetic-server-seed-A,synthetic-client-seed,11,CLASSIC,3 7 12 19 27,,,,,,2 15 25 22 19 29 5 30 13 39,,2026-10-11T12:00:00Z,SYNTHETIC sample
+keno-12,keno,seedrandom_v1,synthetic-server-seed-A,synthetic-client-seed,12,LOW,3 7 12 19 27,,,,,,30 25 13 39 21 14 24 38 34 17,,2026-10-12T12:00:00Z,SYNTHETIC sample
+keno-13,keno,seedrandom_v1,synthetic-server-seed-A,synthetic-client-seed,13,MEDIUM,3 7 12 19 27,,,,,,13 12 7 27 6 4 28 29 35 19,,2026-10-13T12:00:00Z,SYNTHETIC sample
+keno-14,keno,seedrandom_v1,synthetic-server-seed-A,synthetic-client-seed,14,HIGH,3 7 12 19 27,,,,,,26 12 5 33 39 37 40 16 3 7,,2026-10-14T12:00:00Z,SYNTHETIC sample
+keno-15,keno,seedrandom_v1,synthetic-server-seed-A,synthetic-client-seed,15,EXTREME,3 7 12 19 27,,,,,,51 6 27 45 33 18 17 15 47 9,,2026-10-15T12:00:00Z,SYNTHETIC sample
+mines-16,mines,seedrandom_v1,synthetic-server-seed-A,synthetic-client-seed,16,,,3,4,,0,,0 8 5 6,,2026-10-16T12:00:00Z,SYNTHETIC sample
+mines-17,mines,seedrandom_v1,synthetic-server-seed-A,synthetic-client-seed,17,,,5,6,,0,,4 7 12 22 3 10,,2026-10-17T12:00:00Z,SYNTHETIC sample
+mines-18,mines,seedrandom_v1,synthetic-server-seed-A,synthetic-client-seed,18,,,6,7,,0,,26 4 11 28 23 25 12,,2026-10-18T12:00:00Z,SYNTHETIC sample
+mines-19,mines,seedrandom_v1,synthetic-server-seed-A,synthetic-client-seed,19,,,7,8,,0,,41 9 45 16 5 38 21 33,,2026-10-19T12:00:00Z,SYNTHETIC sample
+mines-20,mines,seedrandom_v1,synthetic-server-seed-A,synthetic-client-seed,20,,,8,9,,0,,39 17 46 33 25 52 35 19 30,,2026-10-20T12:00:00Z,SYNTHETIC sample

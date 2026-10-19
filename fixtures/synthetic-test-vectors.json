@@ -1,0 +1,24 @@
+{
+  "_note": "SYNTHETIC deterministic test fixtures computed from the published algorithms. These are NOT real Solpump rounds and do not establish compatibility with live Solpump outcomes.",
+  "inputs": { "serverSeed": "SERVER_TEST_2026", "clientSeed": "CLIENT_TEST_2026", "nonce": "1" },
+  "crash": {
+    "hmac": "34378d55b8ed0c40420731e1bf7cb2f12c8c40c04a00599582611ca61266b165",
+    "multiplier": 1.25
+  },
+  "blackjack": {
+    "cardNumber": 1,
+    "hmac": "044d4627a1cbabc6623aa1742a1fa23e59b3563015aa81098b925bb05be094f1",
+    "card": { "label": "K", "suit": "clubs" }
+  },
+  "keno": {
+    "algorithmVersion": "hmac_sha256_v2",
+    "difficulty": "CLASSIC",
+    "drawn": [27, 35, 20, 8, 1, 29, 37, 2, 19, 10]
+  },
+  "mines": {
+    "algorithmVersion": "hmac_sha256_v2",
+    "gridSize": 5,
+    "mineCount": 3,
+    "mines": [0, 14, 22]
+  }
+}
