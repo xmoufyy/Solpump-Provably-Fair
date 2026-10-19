@@ -20,6 +20,13 @@ afterAll(async () => {
 
 const S = "SERVER_TEST_2026", C = "CLIENT_TEST_2026";
 
+/** v2: imports run as jobs; ?wait=1 returns the finished job, rows are listed by batch id. */
+async function importAndList(text: string, format: string) {
+  const { job } = (await ctx.app.inject({ method: "POST", url: "/api/import?wait=1", payload: { text, format } })).json();
+  const rows = (await ctx.app.inject({ url: `/api/rounds?batch=${job.id}&limit=500` })).json().rounds.reverse();
+  return { job, stored: rows.map((r: { roundId: string; outcomeStatus: string }) => ({ roundId: r.roundId, outcome: r.outcomeStatus })) };
+}
+
 describe("API integration", () => {
   it("POST /api/verify reconstructs Keno and saves it", async () => {
     const res = await ctx.app.inject({
@@ -47,8 +54,7 @@ describe("API integration", () => {
       `bad,keno,hmac_sha256_v2,${S},${C},1,CLASSIC,,,,1 2 x,test`,
       `short,row`,
     ].join("\n");
-    const res = await ctx.app.inject({ method: "POST", url: "/api/import", payload: { text: csv, format: "csv" } });
-    const body = res.json();
+    const body = await importAndList(csv, "csv");
     expect(body.stored.map((s: any) => [s.roundId, s.outcome])).toEqual([
       ["c1", "match"],
       ["c2", "mismatch"],
@@ -56,15 +62,16 @@ describe("API integration", () => {
       ["m1", "match"],
       ["b1", "match"],
     ]);
-    expect(body.rejected).toHaveLength(2);
+    expect(body.job.rejected).toBe(2);
+    expect(body.job.errors.map((e: any) => e.line)).toEqual([7, 8]);
   });
 
   it("JSONL import with a broken line keeps the valid ones", async () => {
     const text = `{"game":"crash","serverSeed":"${S}","clientSeed":"${C}","roundId":"j1"}\n{not json}\n`;
-    const body = (await ctx.app.inject({ method: "POST", url: "/api/import", payload: { text, format: "auto" } })).json();
-    expect(body.format).toBe("jsonl");
+    const body = await importAndList(text, "auto");
+    expect(body.job.format).toBe("jsonl");
     expect(body.stored[0].outcome).toBe("missing_comparison");
-    expect(body.rejected).toHaveLength(1);
+    expect(body.job.rejected).toBe(1);
   });
 
   it("history persists across app restarts (same db file)", async () => {
@@ -109,8 +116,8 @@ describe("API integration", () => {
   it("synthetic sample import (built from the reference implementation) verifies with exactly the 2 planted mismatches", async () => {
     const { readFileSync } = await import("node:fs");
     const text = readFileSync(new URL("../../../fixtures/sample-import-synthetic.csv", import.meta.url), "utf8");
-    const body = (await ctx.app.inject({ method: "POST", url: "/api/import", payload: { text, format: "csv" } })).json();
-    expect(body.rejected).toEqual([]);
+    const body = await importAndList(text, "csv");
+    expect(body.job.errors).toEqual([]);
     expect(body.stored).toHaveLength(27);
     const mism = body.stored.filter((s: any) => s.outcome === "mismatch").map((s: any) => s.roundId);
     expect(mism.sort()).toEqual(["crash-6", "mines-20"]);

@@ -78,6 +78,28 @@ function finish(r: VerificationResult): VerificationResult {
 
 const noComparison = (opts: VerifyOptions): OutcomeStatus => (opts.mode === "import" ? "missing_comparison" : "reconstructed");
 
+/**
+ * The values that define a round's outcome. Used to check that recomputation reproduces a stored
+ * result: auxiliary fields (traces, indices added in later versions, sorted copies) are ignored, so
+ * records written by older versions of the Lab are compared on what actually matters.
+ */
+export function outcomeKey(game: string, calc: unknown): string {
+  if (!calc || typeof calc !== "object") return "null";
+  const c = calc as Record<string, unknown>;
+  switch (game) {
+    case "crash":
+      return JSON.stringify(c.multiplier);
+    case "blackjack":
+      return JSON.stringify(((c.cards as { label: string; suit: string }[]) ?? []).map((k) => [k.label, k.suit]));
+    case "keno":
+      return JSON.stringify([c.difficulty, c.drawn]);
+    case "mines":
+      return JSON.stringify([c.gridSize, c.mines]);
+    default:
+      return JSON.stringify(c);
+  }
+}
+
 /** Multiset equality: [0,0,14] is NOT equal to [0,14,22] (v1 bug F-02). */
 export function sameMultiset(a: readonly number[], b: readonly number[]): boolean {
   if (a.length !== b.length) return false;

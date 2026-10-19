@@ -23,6 +23,28 @@ export interface TxEvidence {
   caveat: string;
 }
 
+const MAX_RPC_BYTES = 8 * 1024 * 1024;
+
+async function readCapped(res: Response, max: number): Promise<string> {
+  const declared = Number(res.headers.get("content-length") ?? 0);
+  if (declared > max) throw new Error(`RPC response too large (${declared} bytes; limit ${max})`);
+  const reader = res.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel();
+      throw new Error(`RPC response too large (over ${max} bytes)`);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 const SIG_RE = /^[1-9A-HJ-NP-Za-km-z]{64,90}$/;
 const MEMO_PROGRAMS = new Set(["MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr", "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo"]);
 
@@ -36,6 +58,7 @@ export async function fetchTransactionEvidence(rpcUrl: string, signature: string
   if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("RPC URL must be http(s)");
 
   const res = await fetch(url, {
+    redirect: "error",
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -47,8 +70,9 @@ export async function fetchTransactionEvidence(rpcUrl: string, signature: string
     signal: AbortSignal.timeout(20000),
   });
   if (!res.ok) throw new Error(`RPC HTTP ${res.status}`);
-  const body = (await res.json()) as { result?: any; error?: { message: string } };
-  if (body.error) throw new Error(`RPC error: ${body.error.message}`);
+  // The RPC endpoint is untrusted: cap the response size before parsing it.
+  const body = JSON.parse(await readCapped(res, MAX_RPC_BYTES)) as { result?: any; error?: { message: string } };
+  if (body.error) throw new Error(`RPC error: ${String(body.error.message).slice(0, 300)}`);
 
   const caveat =
     "Generic transaction evidence only. This tool does not decode Solpump-specific program data. " +
@@ -66,7 +90,7 @@ export async function fetchTransactionEvidence(rpcUrl: string, signature: string
   const memos = instructions
     .filter((i) => MEMO_PROGRAMS.has(i.programId))
     .map((i) => (typeof i.parsed === "string" ? i.parsed : JSON.stringify(i.parsed ?? i.data)));
-  const logMessages: string[] = tx.meta?.logMessages ?? [];
+  const logMessages: string[] = (Array.isArray(tx.meta?.logMessages) ? tx.meta.logMessages : []).slice(0, 500).map((l: unknown) => String(l).slice(0, 2000));
   const rawJson = JSON.stringify(tx);
 
   const searches = needles

@@ -1,162 +1,228 @@
-import type { StoredRound } from "../database/db.js";
+import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { FindingKind, IntegrityFinding, IntegrityReport } from "../../../shared/src/contracts.js";
 
-export type Severity = "info" | "warning" | "attention";
-
-export interface IntegrityFinding {
-  check: string;
-  severity: Severity;
-  title: string;
-  detail: string;
-  roundIds: number[];
-}
+const MAX_IDS = 200; // per finding
+const MAX_FINDINGS_PER_CHECK = 100;
 
 /**
- * Seed-integrity checks over stored audit records.
- * Findings describe data anomalies only. None of them is, by itself, evidence of manipulation:
- * duplicates may come from re-imports, rotations are normal operator behaviour, etc.
+ * Seed-integrity checks, executed as SQL aggregations (no per-row JSON parsing).
+ *
+ * Findings are classified:
+ *  - contradiction: the data cannot all be true under the published deterministic algorithms
+ *                   (e.g. one seed context producing two different outcomes)
+ *  - anomaly:       unusual but explainable (seed reuse, nonce reset, mixed versions, rotation without commitment)
+ *  - data_quality:  missing or invalid evidence
+ * None of these is, by itself, proof of manipulation.
  */
-export function runIntegrityAudit(rounds: StoredRound[]): { findings: IntegrityFinding[]; checked: number } {
+export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
   const findings: IntegrityFinding[] = [];
-  const group = <K>(key: (r: StoredRound) => K | null) => {
-    const m = new Map<K, StoredRound[]>();
-    for (const r of rounds) {
-      const k = key(r);
-      if (k === null) continue;
-      m.set(k, [...(m.get(k) ?? []), r]);
-    }
-    return m;
+  let truncated = false;
+  const checked = (db.prepare("SELECT COUNT(*) AS n FROM rounds").get() as { n: number }).n;
+  const ids = (s: unknown) => String(s ?? "").split(",").filter(Boolean).slice(0, MAX_IDS).map(Number);
+  const add = (f: Omit<IntegrityFinding, "roundIds" | "totalRounds"> & { idList: unknown; total: number }) => {
+    const { idList, total, ...rest } = f;
+    findings.push({ ...rest, roundIds: ids(idList), totalRounds: total });
   };
-  const recorded = (r: StoredRound) => JSON.stringify(r.recorded ?? null);
-  const inputsKey = (r: StoredRound) => JSON.stringify([r.serverSeed, r.clientSeed, r.nonce, r.algorithmVersion]);
-
-  // 1. Duplicate / conflicting round records (same game + round id)
-  for (const [key, list] of group((r) => (r.roundId ? `${r.game}|${r.roundId}` : null))) {
-    if (list.length < 2) continue;
-    const distinctOutcomes = new Set(list.map(recorded));
-    const distinctInputs = new Set(list.map(inputsKey));
-    const [game, rid] = key.split("|");
-    if (distinctOutcomes.size > 1 || distinctInputs.size > 1) {
-      findings.push({
-        check: "conflicting_records",
-        severity: "attention",
-        title: `Conflicting records for ${game} round ${rid}`,
-        detail: `${list.length} records share this round ID but differ in ${distinctInputs.size > 1 ? "fairness inputs" : ""}${distinctInputs.size > 1 && distinctOutcomes.size > 1 ? " and " : ""}${distinctOutcomes.size > 1 ? "recorded outcomes" : ""}.`,
-        roundIds: list.map((r) => r.id),
-      });
-    } else {
-      findings.push({
-        check: "duplicate_records",
-        severity: "info",
-        title: `Duplicate records for ${game} round ${rid}`,
-        detail: `${list.length} identical records (likely re-imported).`,
-        roundIds: list.map((r) => r.id),
-      });
+  const q = <T>(sql: string, ...p: SQLInputValue[]) => {
+    const rows = db.prepare(`${sql} LIMIT ${MAX_FINDINGS_PER_CHECK + 1}`).all(...p) as T[];
+    if (rows.length > MAX_FINDINGS_PER_CHECK) {
+      truncated = true;
+      rows.length = MAX_FINDINGS_PER_CHECK;
     }
-  }
+    return rows;
+  };
+  const SEP = "char(31)";
+  const ctx = `COALESCE(server_seed,'') || ${SEP} || COALESCE(client_seed,'') || ${SEP} || COALESCE(nonce,'') || ${SEP} || COALESCE(algorithm_version,'')`;
+  const game = (g: string) => g.charAt(0).toUpperCase() + g.slice(1);
 
-  // 2. Nonce reuse within a seed context (Keno / Mines): same server+client seed+nonce on different rounds
-  for (const [key, list] of group((r) =>
-    (r.game === "keno" || r.game === "mines") && r.serverSeed && r.nonce !== null ? `${r.game}|${r.serverSeed}|${r.clientSeed}|${r.nonce}` : null,
+  // 1. Same game + round id recorded more than once
+  for (const r of q<Record<string, string | number>>(
+    `SELECT game, round_id, COUNT(*) AS n, COUNT(DISTINCT COALESCE(recorded_json,'')) AS outcomes,
+       COUNT(DISTINCT ${ctx} || ${SEP} || COALESCE(json_extract(inputs_json,'$.difficulty'),'') || ${SEP} || COALESCE(json_extract(inputs_json,'$.gridSize'),'') || ${SEP} || COALESCE(json_extract(inputs_json,'$.mineCount'),'')) AS inputs,
+       group_concat(id) AS ids
+     FROM rounds WHERE round_id IS NOT NULL AND round_id <> '' GROUP BY game, round_id HAVING COUNT(*) > 1 ORDER BY n DESC`,
   )) {
-    const distinctRounds = new Set(list.map((r) => r.roundId ?? `#${r.id}`));
-    if (distinctRounds.size < 2) continue;
-    findings.push({
-      check: "nonce_reuse",
-      severity: "attention",
-      title: `Nonce ${list[0].nonce} reused in one ${list[0].game} seed context`,
-      detail: `${distinctRounds.size} different rounds use the same server seed, client seed and nonce, so they must have identical outcomes. Context: ${key.split("|").slice(2, 3).join("")}`,
-      roundIds: list.map((r) => r.id),
+    const conflicting = Number(r.outcomes) > 1 || Number(r.inputs) > 1;
+    const what = [Number(r.inputs) > 1 ? "fairness inputs" : "", Number(r.outcomes) > 1 ? "recorded outcomes" : ""].filter(Boolean).join(" and ");
+    add({
+      check: conflicting ? "conflicting_records" : "duplicate_records",
+      kind: conflicting ? "contradiction" : "data_quality",
+      severity: conflicting ? "attention" : "info",
+      title: conflicting ? `Conflicting records for ${game(String(r.game))} round ${r.round_id}` : `Duplicate records for ${game(String(r.game))} round ${r.round_id}`,
+      detail: conflicting
+        ? `${r.n} records share this round ID but differ in ${what}. At most one of them can describe the real round.`
+        : `${r.n} identical records (e.g. saved twice). Imports skip exact duplicates automatically.`,
+      idList: r.ids,
+      total: Number(r.n),
     });
   }
 
-  // 3. Crash / Blackjack: same server+public seed pair on different rounds (these games have no nonce)
-  for (const [, list] of group((r) => ((r.game === "crash" || r.game === "blackjack") && r.serverSeed ? `${r.game}|${r.serverSeed}|${r.clientSeed}` : null))) {
-    const distinctRounds = new Set(list.map((r) => r.roundId ?? `#${r.id}`));
-    if (distinctRounds.size < 2) continue;
-    findings.push({
+  // 2. Keno/Mines: same server seed + client seed + nonce on different rounds
+  for (const r of q<Record<string, string | number>>(
+    `SELECT game, nonce, COUNT(DISTINCT COALESCE(round_id, '#' || id)) AS rounds, COUNT(DISTINCT COALESCE(calculated_json,'')) AS calcs,
+       COUNT(DISTINCT CASE WHEN recorded_json IS NOT NULL THEN recorded_json END) AS outcomes, group_concat(id) AS ids, COUNT(*) AS n
+     FROM rounds WHERE game IN ('keno','mines') AND server_seed IS NOT NULL AND nonce IS NOT NULL
+     GROUP BY game, server_seed, client_seed, nonce, algorithm_version,
+       json_extract(inputs_json,'$.difficulty'), json_extract(inputs_json,'$.gridSize'), json_extract(inputs_json,'$.mineCount')
+     HAVING rounds > 1 ORDER BY rounds DESC`,
+  )) {
+    const contradiction = Number(r.outcomes) > 1;
+    add({
+      check: contradiction ? "nonce_reuse_conflicting_outcomes" : "nonce_reuse",
+      kind: contradiction ? "contradiction" : "anomaly",
+      severity: contradiction ? "attention" : "warning",
+      title: `${game(String(r.game))}: nonce ${r.nonce} used by ${r.rounds} different rounds in one seed context`,
+      detail: contradiction
+        ? "The same seeds, nonce and settings always produce the same result, yet these records report different outcomes. They cannot all be correct."
+        : "Identical seeds, nonce and settings must produce identical results; seeing several rounds for one context usually means the nonce was not incremented or rounds were mislabelled.",
+      idList: r.ids,
+      total: Number(r.n),
+    });
+  }
+
+  // 3. Crash / Blackjack: no nonce, so a seed pair should belong to one round
+  for (const r of q<Record<string, string | number>>(
+    `SELECT game, COUNT(DISTINCT COALESCE(round_id, '#' || id)) AS rounds, group_concat(id) AS ids, COUNT(*) AS n
+     FROM rounds WHERE game IN ('crash','blackjack') AND server_seed IS NOT NULL
+     GROUP BY game, server_seed, client_seed HAVING rounds > 1 ORDER BY rounds DESC`,
+  )) {
+    add({
       check: "seed_pair_reuse",
+      kind: "anomaly",
       severity: "warning",
-      title: `${list[0].game} seed pair used for ${distinctRounds.size} rounds`,
-      detail: "The published algorithm has no nonce, so rounds with the same seed pair produce identical outcomes.",
-      roundIds: list.map((r) => r.id),
+      title: `${game(String(r.game))}: one seed pair used for ${r.rounds} rounds`,
+      detail: "The published algorithm has no nonce, so rounds sharing a seed pair must have identical outcomes.",
+      idList: r.ids,
+      total: Number(r.n),
     });
   }
 
-  // 4. Inconsistent algorithm versions for the same seed context
-  for (const [, list] of group((r) => ((r.game === "keno" || r.game === "mines") && r.serverSeed ? `${r.game}|${r.serverSeed}|${r.clientSeed}` : null))) {
-    const versions = new Set(list.map((r) => r.algorithmVersion));
-    if (versions.size < 2) continue;
-    findings.push({
+  // 4. Mixed algorithm versions within one seed pair
+  for (const r of q<Record<string, string | number>>(
+    `SELECT game, group_concat(DISTINCT algorithm_version) AS versions, group_concat(id) AS ids, COUNT(*) AS n
+     FROM rounds WHERE game IN ('keno','mines') AND server_seed IS NOT NULL
+     GROUP BY game, server_seed, client_seed HAVING COUNT(DISTINCT algorithm_version) > 1`,
+  )) {
+    add({
       check: "inconsistent_versions",
+      kind: "anomaly",
       severity: "warning",
-      title: `Mixed algorithm versions within one ${list[0].game} seed pair`,
-      detail: `Versions recorded: ${[...versions].join(", ")}. A single seed pair would normally be used with one algorithm version; check the source data.`,
-      roundIds: list.map((r) => r.id),
+      title: `${game(String(r.game))}: mixed algorithm versions within one seed pair`,
+      detail: `Versions recorded: ${r.versions}. One seed pair would normally be used with one algorithm version; check the source data.`,
+      idList: r.ids,
+      total: Number(r.n),
     });
   }
 
-  // 5. Seed rotations without a recorded commitment for the new server seed (per client seed, by round timestamp)
-  for (const [, list] of group((r) => (r.clientSeed && r.serverSeed && r.roundTimestamp ? `${r.game}|${r.clientSeed}` : null))) {
-    const sorted = [...list].sort((a, b) => String(a.roundTimestamp).localeCompare(String(b.roundTimestamp)));
-    for (let i = 1; i < sorted.length; i++) {
-      const prev = sorted[i - 1], cur = sorted[i];
-      if (prev.serverSeed === cur.serverSeed) continue;
-      const hasCommit = sorted.some((r) => r.serverSeed === cur.serverSeed && r.commitmentStatus !== "not_supplied");
-      if (!hasCommit) {
-        findings.push({
-          check: "unexplained_rotation",
-          severity: "info",
-          title: `Server seed rotated without a recorded commitment (${cur.game})`,
-          detail: `At ${cur.roundTimestamp} the server seed changed for the same client seed, and no commitment for the new seed is recorded in this dataset.`,
-          roundIds: [prev.id, cur.id],
-        });
-      }
-    }
+  // 5. Nonce going backwards within a seed pair, ordered by round timestamp
+  for (const r of q<Record<string, string | number>>(
+    `SELECT game, COUNT(*) AS n, group_concat(id) AS ids FROM (
+       SELECT id, game, server_seed, client_seed, CAST(nonce AS INTEGER) AS nn,
+         LAG(CAST(nonce AS INTEGER)) OVER (PARTITION BY game, server_seed, client_seed ORDER BY round_timestamp, id) AS prev
+       FROM rounds WHERE game IN ('keno','mines') AND round_timestamp IS NOT NULL AND nonce <> '' AND nonce NOT GLOB '*[^0-9]*'
+     ) WHERE prev IS NOT NULL AND nn < prev GROUP BY game, server_seed, client_seed`,
+  )) {
+    add({
+      check: "nonce_reset",
+      kind: "anomaly",
+      severity: "warning",
+      title: `${game(String(r.game))}: nonce decreased ${r.n} time(s) within one seed pair`,
+      detail: "Ordered by recorded timestamp, the nonce went backwards without a server-seed rotation. Timestamps may be wrong, or nonces were reset.",
+      idList: r.ids,
+      total: Number(r.n),
+    });
   }
 
-  // 6. Commitment mismatches
-  const badCommit = rounds.filter((r) => r.commitmentStatus === "mismatch");
-  if (badCommit.length)
-    findings.push({
-      check: "commitment_mismatch",
+  // 6. One commitment recorded for different server seeds (a hash commits to exactly one value)
+  for (const r of q<Record<string, string | number>>(
+    `SELECT commitment, COUNT(DISTINCT server_seed) AS seeds, group_concat(id) AS ids, COUNT(*) AS n
+     FROM rounds WHERE commitment IS NOT NULL AND server_seed IS NOT NULL GROUP BY commitment HAVING seeds > 1`,
+  )) {
+    add({
+      check: "reused_commitment",
+      kind: "contradiction",
       severity: "attention",
-      title: `${badCommit.length} record(s) whose revealed seed does not match the supplied commitment`,
-      detail: "Under the commitment scheme confirmed in Settings, the revealed server seed does not hash to the supplied commitment.",
-      roundIds: badCommit.map((r) => r.id),
+      title: `One commitment recorded for ${r.seeds} different server seeds`,
+      detail: `Commitment ${String(r.commitment).slice(0, 16)}... is attached to different revealed seeds. A cryptographic hash commitment can match at most one of them; at least one record is wrong.`,
+      idList: r.ids,
+      total: Number(r.n),
     });
+  }
 
-  // 7. Outcome mismatches
-  const mism = rounds.filter((r) => r.outcomeStatus === "mismatch");
-  if (mism.length)
-    findings.push({
-      check: "outcome_mismatch",
-      severity: "attention",
-      title: `${mism.length} record(s) whose recorded outcome differs from the reconstruction`,
-      detail: "Check that the correct algorithm version, seeds, nonce and game settings were recorded before drawing conclusions.",
-      roundIds: mism.map((r) => r.id),
-    });
-
-  // 8. Missing source information
-  const noSource = rounds.filter((r) => !r.evidenceSource);
-  if (noSource.length)
-    findings.push({
-      check: "missing_source",
+  // 7. Server-seed rotation without any recorded commitment for the new seed
+  const rot = db
+    .prepare(
+      `SELECT COUNT(*) AS n, group_concat(id) AS ids FROM (
+         SELECT id, server_seed, LAG(server_seed) OVER (PARTITION BY game, client_seed ORDER BY round_timestamp, id) AS prev
+         FROM rounds WHERE round_timestamp IS NOT NULL AND server_seed IS NOT NULL AND client_seed IS NOT NULL
+       ) cur WHERE prev IS NOT NULL AND prev <> server_seed
+         AND NOT EXISTS (SELECT 1 FROM rounds r2 WHERE r2.server_seed = cur.server_seed AND r2.commitment IS NOT NULL)`,
+    )
+    .get() as { n: number; ids: string | null };
+  if (rot.n) {
+    add({
+      check: "rotation_without_commitment",
+      kind: "anomaly",
       severity: "info",
-      title: `${noSource.length} record(s) without an evidence source`,
-      detail: "Records without a source (e.g. 'solpump history export', 'screenshot', 'on-chain tx') are harder to audit later.",
-      roundIds: noSource.map((r) => r.id),
+      title: `${rot.n} server-seed rotation(s) without a recorded commitment for the new seed`,
+      detail: "Rotations are normal, but without the commitment that was shown before the new seed was used, those rounds cannot be tied to a pre-round promise.",
+      idList: rot.ids,
+      total: rot.n,
     });
+  }
 
-  // 9. Invalid records
-  const invalid = rounds.filter((r) => r.outcomeStatus === "invalid_input" || r.outcomeStatus === "unsupported_version");
-  if (invalid.length)
-    findings.push({
-      check: "invalid_records",
-      severity: "warning",
-      title: `${invalid.length} record(s) could not be reconstructed`,
-      detail: "Inputs were missing, invalid or used an unsupported algorithm version.",
-      roundIds: invalid.map((r) => r.id),
-    });
+  // 8-12. status-based findings
+  const statusFinding = (where: string, f: { check: string; kind: FindingKind; severity: IntegrityFinding["severity"]; title: (n: number) => string; detail: string }) => {
+    const r = db.prepare(`SELECT COUNT(*) AS n, (SELECT group_concat(id) FROM (SELECT id FROM rounds WHERE ${where} ORDER BY id LIMIT ${MAX_IDS})) AS ids FROM rounds WHERE ${where}`).get() as {
+      n: number;
+      ids: string | null;
+    };
+    if (r.n) add({ check: f.check, kind: f.kind, severity: f.severity, title: f.title(r.n), detail: f.detail, idList: r.ids, total: r.n });
+  };
+  statusFinding("commitment_status = 'mismatch'", {
+    check: "commitment_mismatch",
+    kind: "contradiction",
+    severity: "attention",
+    title: (n) => `${n} record(s) whose revealed seed does not match the supplied commitment`,
+    detail: "Under the commitment scheme confirmed in Settings, the revealed server seed does not hash to the supplied commitment.",
+  });
+  statusFinding("outcome_status = 'mismatch'", {
+    check: "outcome_mismatch",
+    kind: "contradiction",
+    severity: "attention",
+    title: (n) => `${n} record(s) whose recorded outcome differs from the reconstruction`,
+    detail: "First confirm the algorithm version, seeds, nonce and game settings were recorded correctly; transcription errors are the most common cause.",
+  });
+  statusFinding("server_seed IS NULL OR server_seed = ''", {
+    check: "missing_reveal",
+    kind: "data_quality",
+    severity: "warning",
+    title: (n) => `${n} record(s) without a revealed server seed`,
+    detail: "Nothing can be reconstructed until the server seed is revealed (usually after rotating seeds).",
+  });
+  statusFinding("outcome_status IN ('invalid_input','unsupported_version') AND server_seed IS NOT NULL AND server_seed <> ''", {
+    check: "invalid_records",
+    kind: "data_quality",
+    severity: "warning",
+    title: (n) => `${n} record(s) with invalid game parameters or unsupported versions`,
+    detail: "Open a record to see which field was rejected (e.g. mine count outside the grid, unknown difficulty).",
+  });
+  statusFinding("commitment_status = 'not_supplied' AND outcome_status NOT IN ('invalid_input','unsupported_version')", {
+    check: "missing_commitment",
+    kind: "data_quality",
+    severity: "info",
+    title: (n) => `${n} record(s) without a commitment hash`,
+    detail: "Without the server-seed hash shown before play, the record cannot show the seed was fixed in advance.",
+  });
+  statusFinding("evidence_source IS NULL OR evidence_source = ''", {
+    check: "missing_source",
+    kind: "data_quality",
+    severity: "info",
+    title: (n) => `${n} record(s) without an evidence source`,
+    detail: "Records without a source (e.g. 'Solpump history export', 'screenshot', 'on-chain tx') are harder to audit later.",
+  });
 
-  return { findings, checked: rounds.length };
+  const order: Record<FindingKind, number> = { contradiction: 0, anomaly: 1, data_quality: 2 };
+  findings.sort((a, b) => order[a.kind] - order[b.kind]);
+  return { checked, findings, truncated };
 }
