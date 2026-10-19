@@ -103,3 +103,12 @@ describe("F-08 Import: Mines 'mines' given as a position array was read as the m
     expect((row.input?.reported as { mines: number[] }).mines).toEqual([0, 14, 22]);
   });
 });
+
+describe("F-09 Display: reported crash multipliers were rounded in summaries (history table, CSV)", () => {
+  it("1.254 is shown as 1.254x, 1.25 as 1.25x, 2 as 2.00x", async () => {
+    const { summarizeOutcome } = await import("../../../shared/src/parsing.js");
+    expect(summarizeOutcome("crash", { multiplier: 1.254 })).toBe("1.254x");
+    expect(summarizeOutcome("crash", { multiplier: 1.25 })).toBe("1.25x");
+    expect(summarizeOutcome("crash", { multiplier: 2 })).toBe("2.00x");
+  });
+});

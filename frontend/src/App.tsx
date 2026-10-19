@@ -1,19 +1,25 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import {
-  Binary, Bomb, Download, Fingerprint, GitCompare, Grid3x3, History, Layers, LayoutDashboard, Link2, Rocket, Settings, ShieldCheck, Spade,
+  Binary, Bomb, Download, Fingerprint, GitCompare, Grid3x3, History, KeyRound, Layers, LayoutDashboard, Link2, Rocket, Settings, ShieldCheck, Spade,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { checkHealth, SERVER_DOWN_MESSAGE } from "@/services/api";
-import { DashboardPage } from "@/pages/DashboardPage";
-import { CrashPage } from "@/pages/CrashPage";
-import { BlackjackPage } from "@/pages/BlackjackPage";
-import { KenoPage } from "@/pages/KenoPage";
-import { MinesPage } from "@/pages/MinesPage";
-import { HistoryPage } from "@/pages/HistoryPage";
-import { BatchPage } from "@/pages/BatchPage";
-import { IntegrityPage } from "@/pages/IntegrityPage";
-import { OnChainPage } from "@/pages/OnChainPage";
-import { AlgorithmComparisonPage, ExportPage, HmacInspectorPage, SettingsPage } from "@/pages/ToolsPages";
+
+// Route-level code splitting: charts (Recharts) and rarely used tools are only downloaded when opened.
+const DashboardPage = lazy(() => import("@/pages/DashboardPage").then((m) => ({ default: m.DashboardPage })));
+const CrashPage = lazy(() => import("@/pages/CrashPage").then((m) => ({ default: m.CrashPage })));
+const BlackjackPage = lazy(() => import("@/pages/BlackjackPage").then((m) => ({ default: m.BlackjackPage })));
+const KenoPage = lazy(() => import("@/pages/KenoPage").then((m) => ({ default: m.KenoPage })));
+const MinesPage = lazy(() => import("@/pages/MinesPage").then((m) => ({ default: m.MinesPage })));
+const HistoryPage = lazy(() => import("@/pages/HistoryPage").then((m) => ({ default: m.HistoryPage })));
+const BatchPage = lazy(() => import("@/pages/BatchPage").then((m) => ({ default: m.BatchPage })));
+const SessionsPage = lazy(() => import("@/pages/SessionsPage").then((m) => ({ default: m.SessionsPage })));
+const IntegrityPage = lazy(() => import("@/pages/IntegrityPage").then((m) => ({ default: m.IntegrityPage })));
+const OnChainPage = lazy(() => import("@/pages/OnChainPage").then((m) => ({ default: m.OnChainPage })));
+const HmacInspectorPage = lazy(() => import("@/pages/ToolsPages").then((m) => ({ default: m.HmacInspectorPage })));
+const AlgorithmComparisonPage = lazy(() => import("@/pages/ToolsPages").then((m) => ({ default: m.AlgorithmComparisonPage })));
+const ExportPage = lazy(() => import("@/pages/ToolsPages").then((m) => ({ default: m.ExportPage })));
+const SettingsPage = lazy(() => import("@/pages/ToolsPages").then((m) => ({ default: m.SettingsPage })));
 
 const NAV: { group: string; items: { id: string; label: string; icon: React.ComponentType<{ className?: string }> }[] }[] = [
   { group: "Overview", items: [{ id: "dashboard", label: "Dashboard", icon: LayoutDashboard }] },
@@ -31,6 +37,7 @@ const NAV: { group: string; items: { id: string; label: string; icon: React.Comp
     items: [
       { id: "history", label: "Round History", icon: History },
       { id: "batch", label: "Batch Verification", icon: Layers },
+      { id: "sessions", label: "Seed Sessions", icon: KeyRound },
       { id: "integrity", label: "Seed Integrity", icon: Fingerprint },
       { id: "onchain", label: "On-Chain Evidence", icon: Link2 },
     ],
@@ -45,20 +52,29 @@ const NAV: { group: string; items: { id: string; label: string; icon: React.Comp
     ],
   },
 ];
+const TITLES = Object.fromEntries(NAV.flatMap((g) => g.items).map((i) => [i.id, i.label]));
 
+/** "#/history/12?batch=x" -> { route: "history", arg: "12", params } */
 function readHash() {
-  const [route, arg] = window.location.hash.replace(/^#\/?/, "").split("/");
-  return { route: route || "dashboard", arg };
+  const raw = window.location.hash.replace(/^#\/?/, "");
+  const [path, query = ""] = raw.split("?");
+  const [route, arg] = path.split("/");
+  return { route: route || "dashboard", arg, params: new URLSearchParams(query) };
 }
 
 export default function App() {
-  const [{ route, arg }, setLoc] = useState(readHash);
+  const [{ route, arg, params }, setLoc] = useState(readHash);
+  const [serverUp, setServerUp] = useState(true);
+
   useEffect(() => {
     const on = () => setLoc(readHash());
     window.addEventListener("hashchange", on);
     return () => window.removeEventListener("hashchange", on);
   }, []);
-  const [serverUp, setServerUp] = useState(true);
+  useEffect(() => {
+    document.title = `${TITLES[route] ?? "Dashboard"} · Solpump Fairness Lab`;
+    document.getElementById("main")?.focus({ preventScroll: true });
+  }, [route]);
   useEffect(() => {
     let alive = true;
     const tick = async () => {
@@ -72,6 +88,7 @@ export default function App() {
       window.clearInterval(id);
     };
   }, []);
+
   const go = (r: string) => (window.location.hash = `/${r}`);
   const openRound = (id: number) => go(`history/${id}`);
 
@@ -81,8 +98,9 @@ export default function App() {
     case "blackjack": page = <BlackjackPage />; break;
     case "keno": page = <KenoPage />; break;
     case "mines": page = <MinesPage />; break;
-    case "history": page = <HistoryPage key={arg} initialId={arg ? Number(arg) : undefined} />; break;
-    case "batch": page = <BatchPage openRound={openRound} />; break;
+    case "history": page = <HistoryPage key={`${arg}?${params}`} initialId={arg ? Number(arg) : undefined} params={params} />; break;
+    case "batch": page = <BatchPage />; break;
+    case "sessions": page = <SessionsPage />; break;
     case "integrity": page = <IntegrityPage openRound={openRound} />; break;
     case "onchain": page = <OnChainPage />; break;
     case "hmac": page = <HmacInspectorPage />; break;
@@ -94,10 +112,13 @@ export default function App() {
 
   return (
     <div className="flex h-full">
-      <aside className="hidden w-64 shrink-0 flex-col border-r border-line bg-panel lg:flex">
+      <a href="#main" onClick={(e) => (e.preventDefault(), document.getElementById("main")?.focus())} className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-[100] focus:rounded-lg focus:bg-accent focus:px-4 focus:py-2 focus:text-white">
+        Skip to content
+      </a>
+      <aside className="hidden w-64 shrink-0 flex-col border-r border-line bg-panel lg:flex" aria-label="Main navigation">
         <div className="flex items-center gap-2.5 px-5 py-5">
           <div className="rounded-xl bg-gradient-to-br from-accent to-[#5b21b6] p-2 shadow-[0_0_24px_rgb(139_92_246/0.45)]">
-            <ShieldCheck className="h-5 w-5 text-white" />
+            <ShieldCheck className="h-5 w-5 text-white" aria-hidden />
           </div>
           <div className="leading-tight">
             <div className="text-[13px] font-bold tracking-[0.12em]">SOLPUMP</div>
@@ -106,19 +127,20 @@ export default function App() {
         </div>
         <nav className="flex-1 space-y-5 overflow-y-auto px-3 pb-6 scrollbar-thin">
           {NAV.map((g) => (
-            <div key={g.group}>
-              <div className="px-3 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.2em] text-muted/70">{g.group}</div>
+            <div key={g.group} role="group" aria-labelledby={`nav-${g.group}`}>
+              <div id={`nav-${g.group}`} className="px-3 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.2em] text-muted">{g.group}</div>
               {g.items.map((it) => (
                 <a
                   key={it.id}
                   href={`#/${it.id}`}
                   data-testid={`nav-${it.id}`}
+                  aria-current={route === it.id ? "page" : undefined}
                   className={cn(
                     "flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors",
                     route === it.id ? "bg-accent/15 text-fg shadow-[inset_2px_0_0_var(--color-accent)]" : "text-muted hover:bg-panel-2 hover:text-fg",
                   )}
                 >
-                  <it.icon className={cn("h-4 w-4", route === it.id && "text-accent-2")} />
+                  <it.icon className={cn("h-4 w-4", route === it.id && "text-accent-2")} aria-hidden />
                   {it.label}
                 </a>
               ))}
@@ -128,22 +150,21 @@ export default function App() {
         <div className="border-t border-line px-5 py-3 text-[11px] text-muted">Independent verifier · read-only · no wallet</div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* compact nav for narrow screens */}
-        <div className="flex gap-1 overflow-x-auto border-b border-line bg-panel px-3 py-2 lg:hidden scrollbar-thin">
+        <nav className="flex gap-1 overflow-x-auto border-b border-line bg-panel px-3 py-2 scrollbar-thin lg:hidden" aria-label="Main navigation (compact)">
           {NAV.flatMap((g) => g.items).map((it) => (
-            <a key={it.id} href={`#/${it.id}`} className={cn("whitespace-nowrap rounded-md px-2.5 py-1 text-xs", route === it.id ? "bg-accent text-white" : "text-muted")}>
+            <a key={it.id} href={`#/${it.id}`} aria-current={route === it.id ? "page" : undefined} className={cn("whitespace-nowrap rounded-md px-2.5 py-1 text-xs", route === it.id ? "bg-accent text-white" : "text-muted")}>
               {it.label}
             </a>
           ))}
-        </div>
+        </nav>
         {!serverUp && (
           <div role="alert" data-testid="server-down" className="border-b border-bad/40 bg-bad/10 px-6 py-2.5 text-sm text-bad">
-            {window.location.protocol === "file:"
-              ? "This page was opened as a file. Run start.bat and use http://localhost:8787 instead."
-              : SERVER_DOWN_MESSAGE}
+            {window.location.protocol === "file:" ? "This page was opened as a file. Run start.bat and use http://localhost:8787 instead." : SERVER_DOWN_MESSAGE}
           </div>
         )}
-        <main className="flex-1 overflow-y-auto px-4 py-6 sm:px-8 scrollbar-thin">{page}</main>
+        <main id="main" tabIndex={-1} className="flex-1 overflow-y-auto px-4 py-6 outline-none scrollbar-thin sm:px-8">
+          <Suspense fallback={<p className="text-sm text-muted">Loading…</p>}>{page}</Suspense>
+        </main>
       </div>
     </div>
   );

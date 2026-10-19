@@ -1,12 +1,12 @@
 import { useMemo, useState } from "react";
 import { Bomb, Gem, Minus, Plus, MousePointerClick } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle, FieldError, Input, Label, Segmented, Select, Textarea } from "@/components/ui";
-import { PageHeader, SeedFields, StatusPanel, TraceView, VerifyBar, emptySeeds, errorMap, seedPayload, type SeedState } from "@/components/verification";
+import { ComparisonTable, PageHeader, SeedFields, StaleNotice, StatusPanel, TraceView, VerifyBar, emptySeeds, errorMap, seedPayload, type SeedState } from "@/components/verification";
 import { useVerifier } from "@/services/useVerifier";
-import type { AlgorithmVersion } from "@/services/api";
+import { MINES_GRID_SIZES, type AlgorithmVersion } from "@/services/api";
 import { cn, parseIntList } from "@/lib/utils";
 
-const GRIDS = [3, 5, 6, 7, 8] as const;
+const GRIDS = MINES_GRID_SIZES;
 type Grid = (typeof GRIDS)[number];
 const PRESETS = [1, 3, 5, 10];
 type View = "all" | "mines" | "safe" | "clicked" | "diff";
@@ -22,7 +22,7 @@ export function MinesPage() {
   const [clicked, setClicked] = useState<number[]>([]); // always 0-based internally
   const [reportedOutcome, setReportedOutcome] = useState<"" | "win" | "loss">("");
   const [view, setView] = useState<View>("all");
-  const v = useVerifier();
+  const v = useVerifier<"mines">();
 
   const tileCount = grid * grid;
   const maxMines = tileCount - 1;
@@ -47,18 +47,18 @@ export function MinesPage() {
     algorithmVersion: version,
     gridSize: grid,
     mineCount,
-    indexBase: 0, // clicked tiles are stored 0-based; reported positions converted below
-    clickedTiles: clicked,
-    reported:
-      reported.values.length || reportedOutcome
-        ? { mines: reported.values.length ? reported.values.map((n) => n - indexBase) : null, outcome: reportedOutcome || null }
-        : null,
+    // Evidence is sent exactly as entered: positions in the chosen base, clicked tiles converted to the
+    // same base, so the stored record preserves the original numbering (provenance).
+    indexBase,
+    clickedTiles: clicked.map((t) => t + indexBase),
+    reported: reported.values.length || reportedOutcome ? { mines: reported.values.length ? reported.values : null, outcome: reportedOutcome || null } : null,
   };
   const errors = errorMap(v.result);
   const stale = v.isStale(input);
   const calc = !stale ? v.result?.calculated : null;
   const mines: number[] = calc?.mines ?? [];
-  const repMines: number[] = (!stale && v.result?.reported?.mines) || [];
+  // the verifier reports positions back in 0-based form
+  const repMines: number[] = ((!stale && (v.result?.reported?.mines as number[] | undefined)) || []);
 
   const toggleClick = (t: number) => setClicked((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
 
@@ -75,6 +75,7 @@ export function MinesPage() {
             <div>
               <Label>Algorithm</Label>
               <Segmented
+                ariaLabel="Algorithm version"
                 testId="mines-version"
                 value={version}
                 onChange={setVersion}
@@ -86,7 +87,7 @@ export function MinesPage() {
             </div>
             <div>
               <Label>Grid</Label>
-              <Segmented testId="mines-grid" value={grid} onChange={changeGrid} options={GRIDS.map((g) => ({ value: g, label: String(g * g) }))} />
+              <Segmented testId="mines-grid" ariaLabel="Grid size in tiles" value={grid} onChange={changeGrid} options={GRIDS.map((g) => ({ value: g, label: String(g * g) }))} />
               <p className="mt-1.5 text-xs text-muted">
                 {grid}×{grid} · {tileCount} tiles · 1–{maxMines} mines
               </p>
@@ -128,7 +129,7 @@ export function MinesPage() {
             <div>
               <div className="mb-1.5 flex items-center justify-between">
                 <Label htmlFor="reportedMines" className="mb-0">Reported Positions (optional)</Label>
-                <Select className="h-7 w-auto text-xs" value={indexBase} onChange={(e) => setIndexBase(Number(e.target.value) as 0 | 1)} data-testid="index-base">
+                <Select className="h-7 w-auto text-xs" aria-label="Numbering of reported positions and clicked tiles" value={indexBase} onChange={(e) => setIndexBase(Number(e.target.value) as 0 | 1)} data-testid="index-base">
                   <option value={0}>0-based</option>
                   <option value={1}>1-based</option>
                 </Select>
@@ -138,15 +139,15 @@ export function MinesPage() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <Label>Original outcome</Label>
-                <Select value={reportedOutcome} onChange={(e) => setReportedOutcome(e.target.value as "" | "win" | "loss")}>
+                <Label htmlFor="mines-outcome">Original outcome</Label>
+                <Select id="mines-outcome" value={reportedOutcome} onChange={(e) => setReportedOutcome(e.target.value as "" | "win" | "loss")}>
                   <option value="">Not supplied</option>
                   <option value="win">Win (cashed out)</option>
                   <option value="loss">Loss (hit a mine)</option>
                 </Select>
               </div>
               <div>
-                <Label>Clicked tiles</Label>
+                <span className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">Clicked tiles</span>
                 <div className="flex h-9 items-center justify-between rounded-lg border border-line bg-bg px-3 text-sm">
                   <span>{clicked.length}</span>
                   {clicked.length > 0 && (
@@ -169,6 +170,7 @@ export function MinesPage() {
               </CardTitle>
               <Segmented
                 className="max-w-xl text-xs"
+                ariaLabel="Board view"
                 testId="mines-view"
                 value={view}
                 onChange={setView}
@@ -185,6 +187,8 @@ export function MinesPage() {
               <div
                 className="mx-auto grid gap-2"
                 style={{ gridTemplateColumns: `repeat(${grid}, minmax(0, 1fr))`, maxWidth: Math.min(640, grid * 88) }}
+                role="group"
+                aria-label={`Mines board ${grid} by ${grid}; click a tile to mark it as originally revealed`}
                 data-testid="mines-board"
                 data-tiles={tileCount}
               >
@@ -209,6 +213,8 @@ export function MinesPage() {
                       data-reveal={showMine ? "mine" : showSafe ? "safe" : undefined}
                       data-diff={diff ? "true" : undefined}
                       title={`Tile ${t + 1} (index ${t}) · row ${Math.floor(t / grid) + 1}, col ${(t % grid) + 1}`}
+                      aria-pressed={isClicked}
+                      aria-label={`Tile ${t + 1}, index ${t}, row ${Math.floor(t / grid) + 1}, column ${(t % grid) + 1}${known ? (isMine ? ", mine" : ", safe") : ""}${isClicked ? ", marked as clicked" : ""}${diff ? ", differs from report" : ""}`}
                       className={cn(
                         "tile relative flex aspect-square cursor-pointer flex-col items-center justify-center rounded-xl",
                         isClicked && "outline-2 outline-offset-2 outline-accent-2",
@@ -228,7 +234,7 @@ export function MinesPage() {
             </CardContent>
           </Card>
 
-          {stale && <p className="rounded-lg border border-warn/30 bg-warn/5 px-4 py-2 text-sm text-warn">Inputs changed since the last calculation — run Calculate / Verify again.</p>}
+          {stale && <StaleNotice />}
 
           {calc && (
             <Card>
@@ -241,6 +247,7 @@ export function MinesPage() {
                 <Row label="Mines sorted (0-based)" value={calc.minesSorted.join(", ")} />
                 <Row label="Mines sorted (1-based tiles)" value={calc.minesSorted.map((n: number) => n + 1).join(", ")} />
                 <Row label="Safe tiles (0-based)" value={calc.safe.join(", ")} />
+                <Row label="Raw indices into the shrinking list" value={calc.indices.join(", ")} />
                 {repMines.length > 0 && <Row label="Reported (converted to 0-based)" value={repMines.join(", ")} />}
                 {calc.clickedTiles.length > 0 && (
                   <Row label="Clicked tiles → derived outcome" value={`${calc.clickedTiles.join(", ")} → ${calc.derivedOutcome}${calc.clickedMines.length ? ` (mine at ${calc.clickedMines.join(", ")})` : ""}`} />
@@ -248,6 +255,7 @@ export function MinesPage() {
               </CardContent>
             </Card>
           )}
+          {v.result && !stale && <ComparisonTable rows={v.result.comparisons} />}
           {v.result && !stale && <StatusPanel result={v.result} />}
           {v.result && !stale && <TraceView steps={v.result.trace} />}
         </div>

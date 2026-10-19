@@ -57,7 +57,9 @@ export function summarizeOutcome(game: string, o: unknown): string {
   const v = o as Record<string, unknown>;
   switch (game) {
     case "crash":
-      return typeof v.multiplier === "number" ? `${v.multiplier.toFixed(2)}x` : "";
+      // Never round a reported value for display: 1.254 must not appear as "1.25x" (audit F-09).
+      if (typeof v.multiplier !== "number") return "";
+      return Math.round(v.multiplier * 100) / 100 === v.multiplier ? `${v.multiplier.toFixed(2)}x` : `${v.multiplier}x`;
     case "blackjack": {
       const cards = v.cards as Card[] | undefined;
       return cards ? cards.map((c) => `${c.label}${c.suit[0].toUpperCase()}`).join(" ") : "";

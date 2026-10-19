@@ -2,14 +2,14 @@ import { useState } from "react";
 import { Link2 } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Textarea } from "@/components/ui";
 import { PageHeader } from "@/components/verification";
-import { api } from "@/services/api";
+import { api, type ChainEvidence } from "@/services/api";
 
 export function OnChainPage() {
   const [sig, setSig] = useState("");
   const [needles, setNeedles] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [ev, setEv] = useState<any>(null);
+  const [ev, setEv] = useState<ChainEvidence | null>(null);
 
   const run = async () => {
     setBusy(true);
@@ -64,7 +64,7 @@ export function OnChainPage() {
                   {ev.searches.length > 0 && (
                     <div>
                       <div className="mb-1 text-xs uppercase tracking-wider text-muted">Supplied values</div>
-                      {ev.searches.map((s: any, i: number) => (
+                      {ev.searches.map((s, i) => (
                         <div key={i} className="flex justify-between gap-2 border-t border-line/60 py-1.5">
                           <span className="truncate font-mono text-xs">{s.needle}</span>
                           <span className={s.foundIn.length ? "text-ok" : "text-muted"}>{s.foundIn.length ? `found in ${s.foundIn.join(", ")}` : "not found"}</span>

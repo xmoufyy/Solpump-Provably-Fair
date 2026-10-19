@@ -44,7 +44,7 @@ export class ApiError extends Error {
   }
 }
 
-async function req<T>(url: string, init?: RequestInit & { signal?: AbortSignal }): Promise<T> {
+async function req<T>(url: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(url, {

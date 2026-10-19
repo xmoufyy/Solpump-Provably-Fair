@@ -3,10 +3,10 @@ import { LayoutDashboard, ShieldCheck } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui";
 import { PageHeader } from "@/components/verification";
 import { OverTimeChart, StatusByGameChart } from "@/charts/Charts";
-import { api, STATUS_LABELS } from "@/services/api";
+import { api, STATUS_LABELS, type Stats } from "@/services/api";
 import { cn } from "@/lib/utils";
 
-const METRICS: { key: string; label: string; tone?: string }[] = [
+const METRICS: { key: keyof Stats["metrics"]; label: string; tone?: string }[] = [
   { key: "totalRounds", label: "Total rounds" },
   { key: "reconstructed", label: "Independently reconstructed" },
   { key: "matching", label: "Matching outcomes", tone: "text-ok" },
@@ -21,7 +21,7 @@ const METRICS: { key: string; label: string; tone?: string }[] = [
 ];
 
 export function DashboardPage({ go }: { go: (r: string) => void }) {
-  const [stats, setStats] = useState<any>(null);
+  const [stats, setStats] = useState<Stats | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
     api.stats().then(setStats).catch((e) => setErr(e.message));
@@ -86,10 +86,10 @@ export function DashboardPage({ go }: { go: (r: string) => void }) {
           </div>
           <Card className="mt-6">
             <CardHeader>
-              <CardTitle>Overall status breakdown</CardTitle>
+              <CardTitle>Final assessments</CardTitle>
             </CardHeader>
             <CardContent className="flex flex-wrap gap-3">
-              {Object.entries(stats.overall as Record<string, number>).map(([k, n]) => (
+              {Object.entries(stats.overall).map(([k, n]) => (
                 <div key={k} className="rounded-xl border border-line bg-panel-2 px-4 py-2 text-sm">
                   <span className="font-semibold tabular-nums">{n}</span> <span className="text-muted">{STATUS_LABELS[k] ?? k}</span>
                 </div>

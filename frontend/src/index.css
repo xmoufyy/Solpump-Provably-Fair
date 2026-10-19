@@ -99,3 +99,21 @@ body {
 .tile[data-diff="true"] {
   box-shadow: inset 0 0 0 3px var(--color-warn), 0 3px 0 #17141d;
 }
+
+/* Accessibility: visible keyboard focus everywhere, and respect reduced-motion preferences */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-accent-2);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .tile:hover:not(:disabled) {
+    transform: none;
+  }
+}
