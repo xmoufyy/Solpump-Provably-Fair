@@ -6,7 +6,7 @@ import { computeKeno, KENO_DIFFICULTIES, BOARD_BY_MODE } from "../src/games/keno
 import { computeMines, MINES_GRID_SIZES } from "../src/games/mines.js";
 import { ALGORITHM_VERSIONS } from "../src/types.js";
 import { verifyRound } from "../src/verification/engine.js";
-import * as ref from "./reference/official.mjs";
+import * as ref from "../../tests/reference-parity/reference/official.mjs";
 
 // Test-only seed generator (random seeds are fine here: we compare two independent implementations).
 const rnd = (n = 16) => randomBytes(n).toString("hex");

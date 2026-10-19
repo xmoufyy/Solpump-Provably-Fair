@@ -2,7 +2,7 @@
 // All rows are SYNTHETIC (made-up seeds). One crash row and one mines row are deliberately wrong
 // so the import shows how mismatches are reported.
 import { writeFileSync } from "node:fs";
-import * as ref from "../backend/tests/reference/official.mjs";
+import * as ref from "../tests/reference-parity/reference/official.mjs";
 
 const rows = [["round_id", "game", "algorithm_version", "server_seed", "client_seed", "nonce", "difficulty", "selected_numbers", "grid_size", "mine_count", "clicked_tiles", "index_base", "card_count", "reported_outcome", "commitment", "timestamp", "source"]];
 const S = "synthetic-server-seed-A", C = "synthetic-client-seed";

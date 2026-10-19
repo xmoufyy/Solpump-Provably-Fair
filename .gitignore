@@ -4,3 +4,8 @@ data/*.db
 data/*.db-*
 test-results
 playwright-report
+
+.tmp
+frontend/test-results
+frontend/playwright-report
+data/backups

@@ -5,7 +5,7 @@ import { generateCard } from "../src/games/blackjack.js";
 import { computeKeno } from "../src/games/keno.js";
 import { computeMines } from "../src/games/mines.js";
 import { encodePart } from "../src/crypto/transcript.js";
-import * as ref from "./reference/official.mjs";
+import * as ref from "../../tests/reference-parity/reference/official.mjs";
 
 const fx = JSON.parse(readFileSync(new URL("../../fixtures/synthetic-test-vectors.json", import.meta.url), "utf8"));
 const { serverSeed, clientSeed, nonce } = fx.inputs;
