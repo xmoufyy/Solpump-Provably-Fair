@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { verifyRound } from "../../src/verification/engine.js";
 import { sha256Hex } from "../../src/crypto/hmac.js";
+import type { KenoCalculated, MinesCalculated } from "../../../shared/src/contracts.js";
 
 const manual = { commitmentScheme: "unconfirmed" as const, mode: "manual" as const };
 const confirmed = { commitmentScheme: "sha256_utf8_hex" as const, mode: "manual" as const };
@@ -32,10 +33,11 @@ describe("verification status engine", () => {
     expect(r.overall).toBe("match_commitment_unproven");
   });
 
-  it("commitment mismatch under confirmed scheme -> overall mismatch", () => {
+  // v2 (audit F-06): a commitment mismatch is now its own final assessment instead of "mismatch".
+  it("commitment mismatch under confirmed scheme -> overall commitment_mismatch", () => {
     const r = verifyRound({ game: "crash", serverSeed: S, clientSeed: C, reported: { multiplier: 1.25 }, commitment: "00".repeat(32) }, confirmed);
     expect(r.commitment.status).toBe("mismatch");
-    expect(r.overall).toBe("mismatch");
+    expect(r.overall).toBe("commitment_mismatch");
   });
 
   it("wrong multiplier -> mismatch", () => {
@@ -71,8 +73,8 @@ describe("verification status engine", () => {
     const base = { game: "keno", serverSeed: S, clientSeed: C, nonce: "1", difficulty: "CLASSIC", algorithmVersion: "hmac_sha256_v2", selectedNumbers: [27, 3] };
     const r = verifyRound({ ...base, reported: { draw: [1, 2, 8, 10, 19, 20, 27, 29, 35, 37] } }, manual);
     expect(r.outcome.status).toBe("match");
-    expect(r.calculated!.orderMatches).toBe(false);
-    expect(r.calculated!.matched).toEqual([27]);
+    expect((r.calculated as KenoCalculated).orderMatches).toBe(false);
+    expect((r.calculated as KenoCalculated).matched).toEqual([27]);
     const bad = verifyRound({ ...base, reported: { draw: [1, 2, 8, 10, 19, 20, 27, 29, 35, 38] } }, manual);
     expect(bad.outcome.status).toBe("mismatch");
   });
@@ -93,7 +95,7 @@ describe("verification status engine", () => {
     const base = { game: "mines", serverSeed: S, clientSeed: C, nonce: "1", algorithmVersion: "hmac_sha256_v2", gridSize: 5, mineCount: 3 };
     const loss = verifyRound({ ...base, clickedTiles: [3, 14], reported: { outcome: "loss" } }, manual);
     expect(loss.outcome.status).toBe("match");
-    expect(loss.calculated!.clickedMines).toEqual([14]);
+    expect((loss.calculated as MinesCalculated).clickedMines).toEqual([14]);
     const wrong = verifyRound({ ...base, clickedTiles: [3, 4], reported: { outcome: "loss" } }, manual);
     expect(wrong.outcome.status).toBe("mismatch");
   });

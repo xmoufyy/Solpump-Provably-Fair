@@ -2,12 +2,19 @@
  * Parsers for historical round imports (CSV, JSON, JSONL, pasted text).
  * Each row is normalised independently so one malformed row never sinks the whole import.
  * Seed values are copied byte-for-byte: never trimmed, never re-cased.
+ * All imported data is untrusted: numbers that cannot be represented exactly are rejected,
+ * never silently rounded.
  */
-import { parseCardList } from "../games/blackjack.js";
+import { parseCardList } from "../../../shared/src/parsing.js";
 import { gridSizeFromTileCount } from "../games/mines.js";
 
 export type ImportFormat = "csv" | "json" | "jsonl" | "auto";
 
+export interface RawRow {
+  line: number;
+  raw?: Record<string, unknown>;
+  error?: string;
+}
 export interface ParsedRow {
   line: number;
   input?: Record<string, unknown>;
@@ -41,20 +48,27 @@ export function parseCsv(text: string): string[][] {
   return rows.filter((r) => !(r.length === 1 && r[0] === ""));
 }
 
-const camel = (k: string) => k.trim().replace(/[_\-\s]+([a-zA-Z0-9])/g, (_, c: string) => c.toUpperCase()).replace(/^[A-Z]/, (c) => c.toLowerCase());
+const camel = (k: string) =>
+  k
+    .replace(/^﻿/, "")
+    .trim()
+    .replace(/[_\-\s]+([a-zA-Z0-9])/g, (_, c: string) => c.toUpperCase())
+    .replace(/^[A-Z]/, (c) => c.toLowerCase());
 
 function intList(v: unknown, field: string): number[] | null {
   if (v === undefined || v === null || v === "") return null;
   if (Array.isArray(v)) {
+    if (v.length > 1000) throw new Error(`${field}: too many values`);
     return v.map((x) => {
       const n = typeof x === "number" ? x : Number(String(x).trim());
-      if (!Number.isInteger(n)) throw new Error(`${field}: "${x}" is not an integer`);
+      if (!Number.isSafeInteger(n)) throw new Error(`${field}: "${x}" is not a whole number`);
       return n;
     });
   }
   const tokens = String(v).split(/[\s,;|]+/).filter(Boolean);
+  if (tokens.length > 1000) throw new Error(`${field}: too many values`);
   return tokens.map((t) => {
-    if (!/^-?\d+$/.test(t)) throw new Error(`${field}: "${t}" is not an integer`);
+    if (!/^-?\d+$/.test(t) || !Number.isSafeInteger(Number(t))) throw new Error(`${field}: "${t}" is not a whole number`);
     return Number(t);
   });
 }
@@ -64,6 +78,22 @@ function num(v: unknown, field: string): number | null {
   const n = typeof v === "number" ? v : Number(String(v).trim().replace(/x$/i, ""));
   if (!Number.isFinite(n)) throw new Error(`${field}: "${v}" is not a number`);
   return n;
+}
+
+/**
+ * Identifier-like fields (nonce, round id) must keep every digit. A JSON *number* beyond 2^53
+ * has already lost digits inside JSON.parse, so it is rejected with an explanation (v1 bug F-05).
+ */
+function exactText(v: unknown, field: string): string | null {
+  if (v === undefined || v === null || v === "") return null;
+  if (typeof v === "number") {
+    if (!Number.isSafeInteger(v)) {
+      throw new Error(`${field} ${v} is a JSON number that cannot be represented exactly (beyond 2^53 or not an integer); supply it as a string, e.g. "${field}": "…"`);
+    }
+    return String(v);
+  }
+  if (typeof v === "string") return v;
+  throw new Error(`${field} must be text`);
 }
 
 const opt = (v: unknown) => (v === undefined || v === null || v === "" ? null : String(v));
@@ -86,7 +116,7 @@ export function normalizeRecord(raw: Record<string, unknown>): Record<string, un
   const game = String(r.game ?? "").trim().toLowerCase();
   const out: Record<string, unknown> = {
     game,
-    roundId: opt(r.roundId ?? r.id ?? r.gameId),
+    roundId: exactText(r.roundId ?? r.id ?? r.gameId, "roundId"),
     serverSeed: r.serverSeed ?? r.revealedServerSeed,
     clientSeed: r.clientSeed ?? r.publicSeed,
     commitment: opt(r.commitment ?? r.serverSeedHash ?? r.hashedServerSeed),
@@ -94,7 +124,8 @@ export function normalizeRecord(raw: Record<string, unknown>): Record<string, un
     source: opt(r.source ?? r.evidenceSource),
     txSignature: opt(r.txSignature ?? r.signature),
   };
-  if (r.nonce !== undefined && r.nonce !== null && r.nonce !== "") out.nonce = String(r.nonce);
+  const nonce = exactText(r.nonce, "nonce");
+  if (nonce !== null) out.nonce = nonce;
   if (r.algorithmVersion !== undefined && r.algorithmVersion !== "") {
     const label = String(r.algorithmVersion).trim().toLowerCase();
     out.algorithmVersion = VERSION_LABELS[label] ?? String(r.algorithmVersion);
@@ -111,7 +142,7 @@ export function normalizeRecord(raw: Record<string, unknown>): Record<string, un
       const cc = num(r.cardCount ?? r.numberOfCards, "card count");
       if (cc !== null) out.cardCount = cc;
       const src = r.reportedCards ?? reportedObj.cards ?? r.cards ?? generic;
-      if (Array.isArray(src) && src.every((c) => typeof c === "object")) out.reported = { cards: src };
+      if (Array.isArray(src) && src.every((c) => typeof c === "object" && c !== null)) out.reported = { cards: src };
       else if (src !== undefined && src !== null && src !== "") {
         const { cards, errors } = parseCardList(String(src));
         if (errors.length) throw new Error(errors.join("; "));
@@ -134,14 +165,20 @@ export function normalizeRecord(raw: Record<string, unknown>): Record<string, un
       const g = num(r.gridSize, "grid size");
       const tc = num(r.tileCount ?? r.tiles, "tile count");
       out.gridSize = g ?? (tc !== null ? gridSizeFromTileCount(tc) ?? -1 : undefined);
-      out.mineCount = num(r.mineCount ?? r.mines ?? r.minesCount, "mine count") ?? undefined;
+      // "mines" is ambiguous: a number is the mine count, a list is the reported positions (v1 bug F-08).
+      const minesField = r.mines;
+      const minesIsList = Array.isArray(minesField) || (typeof minesField === "string" && /[\s,;|]/.test(minesField.trim()));
+      out.mineCount = num(r.mineCount ?? r.minesCount ?? (minesIsList ? undefined : minesField), "mine count") ?? undefined;
       const base = num(r.indexBase, "index base");
       out.indexBase = base ?? 0;
       out.clickedTiles = intList(r.clickedTiles ?? r.revealedTiles ?? r.selectedTiles, "clicked tiles");
-      // A generic "outcome" column may hold either win/loss or the mine positions.
       const genericText = opt(generic)?.trim().toLowerCase() ?? null;
       const genericIsResult = genericText === "win" || genericText === "loss";
-      const mines = intList(r.reportedMines ?? reportedObj.mines ?? r.minePositions ?? (genericIsResult ? null : generic), "reported mines");
+      const mines = intList(
+        r.reportedMines ?? reportedObj.mines ?? r.minePositions ?? (minesIsList ? minesField : undefined) ?? (genericIsResult ? null : generic),
+        "reported mines",
+      );
+      if (out.mineCount === undefined && mines) out.mineCount = mines.length;
       const res = opt(r.reportedResult ?? reportedObj.outcome ?? (genericIsResult ? genericText : null))?.trim().toLowerCase() ?? null;
       if (res !== null && res !== "win" && res !== "loss") throw new Error(`reported result must be "win" or "loss" (got "${res}")`);
       out.reported = mines || res ? { mines, outcome: res } : null;
@@ -152,22 +189,28 @@ export function normalizeRecord(raw: Record<string, unknown>): Record<string, un
 }
 
 export function detectFormat(text: string): Exclude<ImportFormat, "auto"> {
-  const t = text.trimStart();
-  if (t.startsWith("[") || (t.startsWith("{") && /"rounds"\s*:/.test(t.slice(0, 2000)))) return "json";
-  if (t.startsWith("{")) return "jsonl";
+  const t = text.replace(/^﻿/, "").trimStart();
+  if (t.startsWith("[")) return "json";
+  if (t.startsWith("{")) {
+    // A single (possibly pretty-printed) JSON document vs. one object per line (v1 bug F-07).
+    try {
+      JSON.parse(t);
+      return "json";
+    } catch {
+      return "jsonl";
+    }
+  }
   return "csv";
 }
 
-export function parseImport(text: string, format: ImportFormat): { format: string; rows: ParsedRow[] } {
+/** Fast structural parse into raw records; per-row normalisation happens later (in chunks). */
+export function parseImportRaw(input: string, format: ImportFormat): { format: Exclude<ImportFormat, "auto">; rows: RawRow[] } {
+  const text = input.replace(/^﻿/, "");
   const fmt = format === "auto" ? detectFormat(text) : format;
-  const rows: ParsedRow[] = [];
+  const rows: RawRow[] = [];
   const push = (line: number, raw: unknown) => {
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return rows.push({ line, error: "Record is not an object" });
-    try {
-      rows.push({ line, input: normalizeRecord(raw as Record<string, unknown>) });
-    } catch (e) {
-      rows.push({ line, error: (e as Error).message });
-    }
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) rows.push({ line, error: "Record is not an object" });
+    else rows.push({ line, raw: raw as Record<string, unknown> });
   };
 
   if (fmt === "json") {
@@ -177,8 +220,8 @@ export function parseImport(text: string, format: ImportFormat): { format: strin
     } catch (e) {
       return { format: fmt, rows: [{ line: 0, error: `Invalid JSON: ${(e as Error).message}` }] };
     }
-    const list = Array.isArray(data) ? data : (data as { rounds?: unknown[] }).rounds;
-    if (!Array.isArray(list)) return { format: fmt, rows: [{ line: 0, error: "JSON must be an array or { rounds: [...] }" }] };
+    const list = Array.isArray(data) ? data : (data as { rounds?: unknown[] })?.rounds ?? (typeof data === "object" && data !== null ? [data] : null);
+    if (!Array.isArray(list)) return { format: fmt, rows: [{ line: 0, error: "JSON must be an array, { rounds: [...] } or a single round object" }] };
     list.forEach((item, i) => push(i + 1, item));
   } else if (fmt === "jsonl") {
     text.split(/\r?\n/).forEach((l, i) => {
@@ -204,4 +247,19 @@ export function parseImport(text: string, format: ImportFormat): { format: strin
     });
   }
   return { format: fmt, rows };
+}
+
+export function normalizeRow(row: RawRow): ParsedRow {
+  if (!row.raw) return { line: row.line, error: row.error ?? "Unparseable row" };
+  try {
+    return { line: row.line, input: normalizeRecord(row.raw) };
+  } catch (e) {
+    return { line: row.line, error: (e as Error).message };
+  }
+}
+
+/** Convenience: raw parse + normalisation of every row. */
+export function parseImport(text: string, format: ImportFormat): { format: string; rows: ParsedRow[] } {
+  const { format: fmt, rows } = parseImportRaw(text, format);
+  return { format: fmt, rows: rows.map(normalizeRow) };
 }

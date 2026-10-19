@@ -6,6 +6,7 @@ import { computeKeno, KENO_DIFFICULTIES, BOARD_BY_MODE } from "../../src/games/k
 import { computeMines, MINES_GRID_SIZES } from "../../src/games/mines.js";
 import { ALGORITHM_VERSIONS } from "../../src/types.js";
 import { verifyRound } from "../../src/verification/engine.js";
+import type { KenoCalculated } from "../../../shared/src/contracts.js";
 import * as ref from "../../../tests/reference-parity/reference/official.mjs";
 
 // Test-only seed generator (random seeds are fine here: we compare two independent implementations).
@@ -110,9 +111,9 @@ describe("Keno parity", () => {
           { commitmentScheme: "unconfirmed", mode: "manual" },
         );
         expect(r.outcome.status).toBe("reconstructed");
-        expect(r.calculated!.drawn).toEqual(drawn);
-        expect(r.calculated!.pickCount).toBe(picks.length);
-        expect(r.calculated!.matchCount).toBe(picks.filter((p) => drawn.includes(p)).length);
+        expect((r.calculated as KenoCalculated).drawn).toEqual(drawn);
+        expect((r.calculated as KenoCalculated).pickCount).toBe(picks.length);
+        expect((r.calculated as KenoCalculated).matchCount).toBe(picks.filter((p) => drawn.includes(p)).length);
       }
     }
   });
