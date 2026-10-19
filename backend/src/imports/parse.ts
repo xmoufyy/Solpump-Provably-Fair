@@ -21,9 +21,8 @@ export interface ParsedRow {
   error?: string;
 }
 
-/** RFC 4180 CSV parser (quoted fields, escaped quotes, CRLF). Values are not trimmed. */
-export function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
+/** RFC 4180 CSV records, yielded one at a time (quoted fields, escaped quotes, CRLF). Values are not trimmed. */
+export function* iterateCsv(text: string): Generator<string[]> {
   let row: string[] = [];
   let field = "";
   let inQuotes = false;
@@ -39,13 +38,36 @@ export function parseCsv(text: string): string[][] {
     else if (ch === "\n" || ch === "\r") {
       if (ch === "\r" && text[i + 1] === "\n") i++;
       row.push(field);
-      rows.push(row);
+      if (!(row.length === 1 && row[0] === "")) yield row;
       row = [];
       field = "";
     } else field += ch;
   }
-  if (field !== "" || row.length) row.push(field), rows.push(row);
-  return rows.filter((r) => !(r.length === 1 && r[0] === ""));
+  if (field !== "" || row.length) {
+    row.push(field);
+    if (!(row.length === 1 && row[0] === "")) yield row;
+  }
+}
+
+export function parseCsv(text: string): string[][] {
+  return [...iterateCsv(text)];
+}
+
+/** Exact number of non-empty CSV records (quote-aware), used for progress reporting. */
+function countCsvRecords(text: string): number {
+  let n = 0;
+  let inQuotes = false;
+  let empty = true;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 34) inQuotes = !inQuotes;
+    if (!inQuotes && (c === 10 || c === 13)) {
+      if (c === 13 && text.charCodeAt(i + 1) === 10) i++;
+      if (!empty) n++;
+      empty = true;
+    } else empty = false;
+  }
+  return empty ? n : n + 1;
 }
 
 const camel = (k: string) =>
@@ -203,50 +225,85 @@ export function detectFormat(text: string): Exclude<ImportFormat, "auto"> {
   return "csv";
 }
 
-/** Fast structural parse into raw records; per-row normalisation happens later (in chunks). */
-export function parseImportRaw(input: string, format: ImportFormat): { format: Exclude<ImportFormat, "auto">; rows: RawRow[] } {
-  const text = input.replace(/^﻿/, "");
+export interface ImportSource {
+  format: Exclude<ImportFormat, "auto">;
+  /** number of records the iterator will yield */
+  total: number;
+  rows: Iterable<RawRow>;
+}
+
+const asRaw = (line: number, raw: unknown): RawRow =>
+  typeof raw !== "object" || raw === null || Array.isArray(raw) ? { line, error: "Record is not an object" } : { line, raw: raw as Record<string, unknown> };
+
+/**
+ * Opens an import lazily: CSV and JSONL records are parsed on demand (inside the importer's
+ * time slices), so a large file never blocks the event loop in one piece and the whole file
+ * is never held as parsed objects at once. JSON documents are parsed in one call (JSON.parse).
+ */
+export function openImport(input: string, format: ImportFormat): ImportSource {
+  const text = input.replace(/^\uFEFF/, "");
   const fmt = format === "auto" ? detectFormat(text) : format;
-  const rows: RawRow[] = [];
-  const push = (line: number, raw: unknown) => {
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) rows.push({ line, error: "Record is not an object" });
-    else rows.push({ line, raw: raw as Record<string, unknown> });
-  };
 
   if (fmt === "json") {
     let data: unknown;
     try {
       data = JSON.parse(text);
     } catch (e) {
-      return { format: fmt, rows: [{ line: 0, error: `Invalid JSON: ${(e as Error).message}` }] };
+      return { format: fmt, total: 1, rows: [{ line: 0, error: `Invalid JSON: ${(e as Error).message}` }] };
     }
     const list = Array.isArray(data) ? data : (data as { rounds?: unknown[] })?.rounds ?? (typeof data === "object" && data !== null ? [data] : null);
-    if (!Array.isArray(list)) return { format: fmt, rows: [{ line: 0, error: "JSON must be an array, { rounds: [...] } or a single round object" }] };
-    list.forEach((item, i) => push(i + 1, item));
-  } else if (fmt === "jsonl") {
-    text.split(/\r?\n/).forEach((l, i) => {
-      if (!l.trim()) return;
-      try {
-        push(i + 1, JSON.parse(l));
-      } catch (e) {
-        rows.push({ line: i + 1, error: `Invalid JSON line: ${(e as Error).message}` });
-      }
-    });
-  } else {
-    const table = parseCsv(text);
-    if (table.length < 2) return { format: fmt, rows: [{ line: 0, error: "CSV needs a header row and at least one data row" }] };
-    const header = table[0].map((h) => h.trim());
-    table.slice(1).forEach((cells, i) => {
-      if (cells.length !== header.length) {
-        rows.push({ line: i + 2, error: `Expected ${header.length} columns, found ${cells.length}` });
-        return;
-      }
-      const obj: Record<string, string> = {};
-      header.forEach((h, j) => (obj[h] = cells[j]));
-      push(i + 2, obj);
-    });
+    if (!Array.isArray(list)) return { format: fmt, total: 1, rows: [{ line: 0, error: "JSON must be an array, { rounds: [...] } or a single round object" }] };
+    return { format: fmt, total: list.length, rows: list.map((item, i) => asRaw(i + 1, item)) };
   }
-  return { format: fmt, rows };
+
+  if (fmt === "jsonl") {
+    const lines = text.split(/\r?\n/);
+    return {
+      format: fmt,
+      total: lines.filter((l) => l.trim()).length,
+      rows: (function* () {
+        for (let i = 0; i < lines.length; i++) {
+          if (!lines[i].trim()) continue;
+          try {
+            yield asRaw(i + 1, JSON.parse(lines[i]));
+          } catch (e) {
+            yield { line: i + 1, error: `Invalid JSON line: ${(e as Error).message}` };
+          }
+        }
+      })(),
+    };
+  }
+
+  const records = countCsvRecords(text);
+  if (records < 2) return { format: fmt, total: 1, rows: [{ line: 0, error: "CSV needs a header row and at least one data row" }] };
+  return {
+    format: fmt,
+    total: records - 1,
+    rows: (function* () {
+      let header: string[] | null = null;
+      let i = 0;
+      for (const cells of iterateCsv(text)) {
+        if (!header) {
+          header = cells.map((h) => h.trim());
+          continue;
+        }
+        const line = i++ + 2;
+        if (cells.length !== header.length) {
+          yield { line, error: `Expected ${header.length} columns, found ${cells.length}` };
+          continue;
+        }
+        const obj: Record<string, string> = {};
+        for (let j = 0; j < header.length; j++) obj[header[j]] = cells[j];
+        yield asRaw(line, obj);
+      }
+    })(),
+  };
+}
+
+/** Eager variant (tests / small inputs). */
+export function parseImportRaw(input: string, format: ImportFormat): { format: Exclude<ImportFormat, "auto">; rows: RawRow[] } {
+  const src = openImport(input, format);
+  return { format: src.format, rows: [...src.rows] };
 }
 
 export function normalizeRow(row: RawRow): ParsedRow {

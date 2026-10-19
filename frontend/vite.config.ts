@@ -5,7 +5,12 @@ import { fileURLToPath, URL } from "node:url";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } },
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+      "@shared": fileURLToPath(new URL("../shared/src", import.meta.url)),
+    },
+  },
   build: { chunkSizeWarningLimit: 1200 },
   server: { port: 5173, proxy: { "/api": "http://127.0.0.1:8787" } },
 });

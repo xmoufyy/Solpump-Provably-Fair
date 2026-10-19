@@ -110,6 +110,8 @@ export const MIGRATIONS: Migration[] = [
         CREATE INDEX idx_rounds_seed_ctx ON rounds(game, server_seed, client_seed, nonce);
         CREATE INDEX idx_rounds_commitment ON rounds(commitment);
         CREATE INDEX idx_imports_created ON imports(created_at);
+        -- redundant: idx_rounds_seed_ctx starts with game (one fewer index to maintain per insert)
+        DROP INDEX IF EXISTS idx_rounds_game;
       `);
     },
     down(db) {
@@ -121,6 +123,7 @@ export const MIGRATIONS: Migration[] = [
         DROP INDEX IF EXISTS idx_rounds_seed_ctx;
         DROP INDEX IF EXISTS idx_rounds_commitment;
         DROP INDEX IF EXISTS idx_imports_created;
+        CREATE INDEX IF NOT EXISTS idx_rounds_game ON rounds(game);
         UPDATE rounds SET overall_status = 'mismatch', result_json = json_set(result_json, '$.overall', 'mismatch')
           WHERE overall_status = 'commitment_mismatch';
         ALTER TABLE rounds DROP COLUMN fingerprint;

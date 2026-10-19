@@ -5,7 +5,7 @@ import { GAMES, LIMITS, type ImportJob } from "../../../shared/src/contracts.js"
 import type { FairnessDb } from "../database/db.js";
 import { fingerprintOf } from "../database/db.js";
 import { verifyRound, type VerifyOptions } from "../verification/engine.js";
-import { normalizeRow, parseImportRaw, type ImportFormat, type RawRow } from "./parse.js";
+import { normalizeRow, openImport, type ImportFormat, type RawRow } from "./parse.js";
 
 export interface StartImportOptions {
   format: ImportFormat;
@@ -42,13 +42,13 @@ export class ImportJobs {
   ) {}
 
   start(text: string, opts: StartImportOptions): ImportJob {
-    const { format, rows } = parseImportRaw(text, opts.format);
+    const { format, rows, total } = openImport(text, opts.format);
     const job: ImportJob = {
       id: randomUUID(),
       status: "running",
       format,
       filename: opts.filename ?? null,
-      total: rows.length,
+      total,
       processed: 0,
       stored: 0,
       rejected: 0,
@@ -67,7 +67,8 @@ export class ImportJobs {
     return { ...job };
   }
 
-  private async run(c: Control, rows: RawRow[], opts: StartImportOptions): Promise<ImportJob> {
+  private async run(c: Control, source: Iterable<RawRow>, opts: StartImportOptions): Promise<ImportJob> {
+    const rows = source[Symbol.iterator]();
     const { job } = c;
     // Time-sliced chunks: commit + yield after SLICE_MS of work or `maxRows` rows, whichever comes first.
     // Measured (20k rows): fixed 250-row chunks 4.8 s, 500 3.8 s, 2000 3.4 s - but 2000 rows can hold the
@@ -82,8 +83,8 @@ export class ImportJobs {
       else job.errorsTruncated = true;
     };
     try {
-      let i = 0;
-      while (i < rows.length) {
+      let next = rows.next();
+      while (!next.done) {
         if (c.paused) {
           job.status = "paused";
           this.db.updateImport(job);
@@ -94,9 +95,8 @@ export class ImportJobs {
         this.db.db.exec("BEGIN IMMEDIATE");
         try {
           const sliceStart = performance.now();
-          const end = Math.min(rows.length, i + maxRows);
-          for (; i < end && performance.now() - sliceStart < SLICE_MS; i++) {
-            const row = normalizeRow(rows[i]);
+          for (let n = 0; !next.done && n < maxRows && performance.now() - sliceStart < SLICE_MS; n++, next = rows.next()) {
+            const row = normalizeRow(next.value);
             job.processed++;
             if (!row.input) {
               reject(row.line, row.error ?? "Unparseable row");
@@ -126,6 +126,7 @@ export class ImportJobs {
         this.db.updateImport(job);
         await yieldToEventLoop();
       }
+      if (!c.cancelled) job.total = job.processed; // exact once fully read
       job.status = c.cancelled ? "cancelled" : "completed";
     } catch (e) {
       job.status = "failed";

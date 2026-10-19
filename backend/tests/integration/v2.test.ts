@@ -319,3 +319,15 @@ describe("analytics, integrity, re-audit, scripts, exports", () => {
     snap.db.close();
   });
 });
+
+describe("schema stability", () => {
+  it("re-opening a migrated database does not resurrect dropped indexes", () => {
+    const p = join(tmp, "reopen.db");
+    new FairnessDb(p).db.close();
+    const db = new FairnessDb(p);
+    const idx = (db.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as { name: string }[]).map((r) => r.name);
+    expect(idx).not.toContain("idx_rounds_game");
+    expect(idx).toContain("idx_rounds_seed_ctx");
+    db.db.close();
+  });
+});

@@ -1,0 +1,145 @@
+{
+  "node": "v22.23.2",
+  "platform": "win32",
+  "date": "2026-10-19T08:45:03.004Z",
+  "verifyPerSecond": {
+    "crash": 38904,
+    "blackjack": 21874,
+    "keno": 22685,
+    "mines_8x8_63": 10633
+  },
+  "imports": [
+    {
+      "rows": 1000,
+      "csvBytes": 169610,
+      "stored": 1000,
+      "importMs": 201,
+      "rowsPerSecond": 4978,
+      "peakRssDeltaMB": 5,
+      "maxEventLoopStallMs": 93,
+      "healthProbeMaxMs": 3,
+      "healthProbes": 5,
+      "dbMB": 2.3,
+      "queries": {
+        "stats": {
+          "ms": 7,
+          "status": 200,
+          "bytes": 2394
+        },
+        "integrity": {
+          "ms": 14,
+          "status": 200,
+          "bytes": 2127
+        },
+        "historyPage": {
+          "ms": 2,
+          "status": 200,
+          "bytes": 30709
+        },
+        "historySearch": {
+          "ms": 1,
+          "status": 200,
+          "bytes": 752
+        },
+        "historyFilter": {
+          "ms": 0,
+          "status": 200,
+          "bytes": 23
+        },
+        "exportCsv": {
+          "ms": 27,
+          "status": 200,
+          "bytes": 341441
+        }
+      }
+    },
+    {
+      "rows": 10000,
+      "csvBytes": 1709724,
+      "stored": 10000,
+      "importMs": 1929,
+      "rowsPerSecond": 5185,
+      "peakRssDeltaMB": 37,
+      "maxEventLoopStallMs": 178,
+      "healthProbeMaxMs": 1,
+      "healthProbes": 15,
+      "dbMB": 22.9,
+      "queries": {
+        "stats": {
+          "ms": 67,
+          "status": 200,
+          "bytes": 2432
+        },
+        "integrity": {
+          "ms": 312,
+          "status": 200,
+          "bytes": 2339
+        },
+        "historyPage": {
+          "ms": 1,
+          "status": 200,
+          "bytes": 31024
+        },
+        "historySearch": {
+          "ms": 30,
+          "status": 200,
+          "bytes": 6992
+        },
+        "historyFilter": {
+          "ms": 0,
+          "status": 200,
+          "bytes": 23
+        },
+        "exportCsv": {
+          "ms": 223,
+          "status": 200,
+          "bytes": 3437356
+        }
+      }
+    },
+    {
+      "rows": 100000,
+      "csvBytes": 17246603,
+      "stored": 100000,
+      "importMs": 31851,
+      "rowsPerSecond": 3140,
+      "peakRssDeltaMB": 331,
+      "maxEventLoopStallMs": 623,
+      "healthProbeMaxMs": 1,
+      "healthProbes": 157,
+      "dbMB": 232,
+      "queries": {
+        "stats": {
+          "ms": 738,
+          "status": 200,
+          "bytes": 2470
+        },
+        "integrity": {
+          "ms": 3452,
+          "status": 200,
+          "bytes": 2541
+        },
+        "historyPage": {
+          "ms": 2,
+          "status": 200,
+          "bytes": 31385
+        },
+        "historySearch": {
+          "ms": 294,
+          "status": 200,
+          "bytes": 31283
+        },
+        "historyFilter": {
+          "ms": 1,
+          "status": 200,
+          "bytes": 23
+        },
+        "exportCsv": {
+          "ms": 2060,
+          "status": 200,
+          "bytes": 34622973
+        }
+      }
+    }
+  ]
+}

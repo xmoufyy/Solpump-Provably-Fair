@@ -109,20 +109,37 @@ export function Segmented<T extends string | number>({
   onChange,
   className,
   testId,
+  ariaLabel,
 }: {
   value: T;
   options: { value: T; label: React.ReactNode; disabled?: boolean }[];
   onChange: (v: T) => void;
   className?: string;
   testId?: string;
+  ariaLabel?: string;
 }) {
   return (
-    <div role="radiogroup" data-testid={testId} className={cn("flex flex-wrap gap-1 rounded-xl border border-line bg-bg p-1", className)}>
+    <div
+      role="radiogroup"
+      aria-label={ariaLabel}
+      data-testid={testId}
+      className={cn("flex flex-wrap gap-1 rounded-xl border border-line bg-bg p-1", className)}
+      onKeyDown={(e) => {
+        if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) return;
+        const enabled = options.filter((o) => !o.disabled);
+        const i = enabled.findIndex((o) => o.value === value);
+        const next = enabled[(i + (e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 1) + enabled.length) % enabled.length];
+        e.preventDefault();
+        onChange(next.value);
+        requestAnimationFrame(() => (e.currentTarget.querySelector('[aria-checked="true"]') as HTMLElement | null)?.focus());
+      }}
+    >
       {options.map((o) => (
         <button
           type="button"
           role="radio"
           aria-checked={o.value === value}
+          tabIndex={o.value === value ? 0 : -1}
           key={String(o.value)}
           disabled={o.disabled}
           onClick={() => onChange(o.value)}
@@ -138,7 +155,11 @@ export function Segmented<T extends string | number>({
   );
 }
 
-export function FieldError({ children }: { children?: React.ReactNode }) {
+export function FieldError({ children, id }: { children?: React.ReactNode; id?: string }) {
   if (!children) return null;
-  return <p className="mt-1 text-xs text-bad">{children}</p>;
+  return (
+    <p id={id} className="mt-1 text-xs text-bad" role="alert">
+      {children}
+    </p>
+  );
 }

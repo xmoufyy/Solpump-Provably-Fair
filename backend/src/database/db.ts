@@ -102,7 +102,10 @@ export class FairnessDb {
     // WAL + synchronous=NORMAL: never corrupts; an application crash loses nothing; an OS crash or power loss can
     // lose only the most recent commits. Per-commit fsync (FULL) made imports ~2x slower on Windows.
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
-    this.db.exec(V0_SCHEMA);
+    // 64 MB page cache (default 2 MB): random fingerprint keys made index pages thrash past ~50k rows.
+    this.db.exec("PRAGMA cache_size = -65536; PRAGMA temp_store = MEMORY;");
+    // base (v0) schema only for new or legacy files; later versions are reached through migrations
+    if (this.schemaVersion === 0) this.db.exec(V0_SCHEMA);
     this.migration = this.migrate();
     // Jobs that were running when the process stopped can never resume; mark them honestly.
     this.db.prepare("UPDATE imports SET status = 'interrupted', finished_at = ? WHERE status IN ('running','paused')").run(new Date().toISOString());

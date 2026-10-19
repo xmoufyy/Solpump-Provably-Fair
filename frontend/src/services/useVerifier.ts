@@ -1,36 +1,40 @@
-import { useCallback, useState } from "react";
-import { api, type VerificationResult } from "./api";
+import { useCallback, useRef, useState } from "react";
+import type { Game, VerificationResult } from "@shared/contracts";
+import { api } from "./api";
 
 /**
- * Runs a verification against the backend and remembers which exact input produced the
- * displayed result, so the UI can flag a stale result once any input changes.
+ * Runs a verification and remembers which exact input produced the displayed result, so the UI
+ * can flag a stale result as soon as any input changes. Out-of-order responses are discarded.
  */
-export function useVerifier() {
-  const [result, setResult] = useState<VerificationResult | null>(null);
+export function useVerifier<G extends Game>() {
+  const [result, setResult] = useState<VerificationResult<G> | null>(null);
   const [resultKey, setResultKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<number | null>(null);
+  const seq = useRef(0);
 
   const run = useCallback(async (input: Record<string, unknown>, save = false) => {
+    const mine = ++seq.current;
     setBusy(true);
     setError(null);
     setSaved(null);
     try {
       const { result, savedId } = await api.verify(input, save);
-      setResult(result);
+      if (mine !== seq.current) return null;
+      setResult(result as VerificationResult<G>);
       setResultKey(JSON.stringify(input));
       if (savedId) setSaved(savedId);
       return result;
     } catch (e) {
-      setError((e as Error).message);
+      if (mine === seq.current) setError((e as Error).message);
       return null;
     } finally {
-      setBusy(false);
+      if (mine === seq.current) setBusy(false);
     }
   }, []);
 
   const isStale = (input: Record<string, unknown>) => result !== null && resultKey !== JSON.stringify(input);
 
-  return { result, busy, error, saved, run, isStale, reset: () => (setResult(null), setResultKey(null)) };
+  return { result, busy, error, saved, run, isStale };
 }
