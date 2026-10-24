@@ -69,7 +69,7 @@ export function KenoPage() {
         title="Keno Verification"
         subtitle="Reconstructs the ten winning numbers from the revealed server seed, client seed and nonce. Your picks and the risk level are not part of the draw — only Extreme changes the board to 56 numbers."
       />
-      <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[360px_1fr]">
         <Card>
           <CardContent className="space-y-5">
             <div>
@@ -108,7 +108,7 @@ export function KenoPage() {
               />
               <FieldError>{reported.error}</FieldError>
             </div>
-            <VerifyBar onRun={() => run(false)} onSave={() => run(true)} busy={v.busy} saved={v.saved} error={v.error} />
+            <VerifyBar onRun={() => run(false)} onSave={() => run(true)} busy={v.busy} saved={v.saved} error={v.error} stale={stale} />
           </CardContent>
         </Card>
 

@@ -12,7 +12,16 @@ const seed = (name: string) =>
     .min(1, `${name} is required`)
     .max(LIMITS.seedLength, `${name} is longer than ${LIMITS.seedLength} characters`);
 const optionalText = z.string().max(LIMITS.textField, `must be at most ${LIMITS.textField} characters`).optional().nullable();
-const intList = (max: number) => z.array(z.number().int()).max(max, `at most ${max} values`);
+
+/**
+ * Array bounded BEFORE its elements are validated. z.array(item).max(n) validates every element first and
+ * records one issue per bad element: a 16 MB body of 4M invalid values cost ~2.2 GB and 8 s of a blocked
+ * event loop. Checking the length on unknown elements first keeps the cost bounded by `max`.
+ */
+export function boundedArray<T extends z.ZodTypeAny>(item: T, max: number, message = `at most ${max} values`) {
+  return z.array(z.unknown()).max(max, message).pipe(z.array(item));
+}
+const intList = (max: number) => boundedArray(z.number().int(), max);
 const nonce = z
   .string({ required_error: "Nonce is required", invalid_type_error: "Nonce must be text (numeric nonces are passed as strings to preserve every digit)" })
   .min(1, "Nonce is required")
@@ -44,9 +53,7 @@ export const blackjackInputSchema = z.object({
   cardCount: z.number().int().min(1).max(LIMITS.blackjackCards).default(10),
   reported: z
     .object({
-      cards: z
-        .array(z.object({ label: z.string().max(8), suit: z.string().max(16) }))
-        .max(LIMITS.blackjackCards, `at most ${LIMITS.blackjackCards} reported cards`)
+      cards: boundedArray(z.object({ label: z.string().max(8), suit: z.string().max(16) }), LIMITS.blackjackCards, `at most ${LIMITS.blackjackCards} reported cards`)
         .optional()
         .nullable(),
     })

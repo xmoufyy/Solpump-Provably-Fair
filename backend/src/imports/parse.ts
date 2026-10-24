@@ -23,9 +23,20 @@ export interface ParsedRow {
 
 /** RFC 4180 CSV records, yielded one at a time (quoted fields, escaped quotes, CRLF). Values are not trimmed. */
 export function* iterateCsv(text: string): Generator<string[]> {
+  for (const r of iterateCsvRecords(text)) yield r.cells;
+}
+
+/**
+ * The CSV state machine. `line` is the physical (1-based) line on which each record starts, so error
+ * messages point at the right place even with blank lines or quoted fields that span lines.
+ * A quote opens a quoted field only at the start of a field; elsewhere it is literal.
+ */
+function* iterateCsvRecords(text: string): Generator<{ cells: string[]; line: number }> {
   let row: string[] = [];
   let field = "";
   let inQuotes = false;
+  let line = 1;
+  let recordLine = 1;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (inQuotes) {
@@ -34,7 +45,10 @@ export function* iterateCsv(text: string): Generator<string[]> {
           field += '"';
           i++;
         } else inQuotes = false;
-      } else field += ch;
+      } else {
+        if (ch === "\n" || (ch === "\r" && text[i + 1] !== "\n")) line++;
+        field += ch;
+      }
     } else if (ch === '"' && field === "") inQuotes = true;
     else if (ch === ",") {
       row.push(field);
@@ -43,14 +57,15 @@ export function* iterateCsv(text: string): Generator<string[]> {
     else if (ch === "\n" || ch === "\r") {
       if (ch === "\r" && text[i + 1] === "\n") i++;
       row.push(field);
-      if (!(row.length === 1 && row[0] === "")) yield row;
+      if (!(row.length === 1 && row[0] === "")) yield { cells: row, line: recordLine };
       row = [];
       field = "";
+      recordLine = ++line;
     } else field += ch;
   }
   if (field !== "" || row.length) {
     row.push(field);
-    if (!(row.length === 1 && row[0] === "")) yield row;
+    if (!(row.length === 1 && row[0] === "")) yield { cells: row, line: recordLine };
   }
 }
 
@@ -58,21 +73,48 @@ export function parseCsv(text: string): string[][] {
   return [...iterateCsv(text)];
 }
 
-/** Exact number of non-empty CSV records (quote-aware), used for progress reporting. */
-function countCsvRecords(text: string): number {
-  let n = 0;
+/**
+ * Exact number of non-empty CSV records, using the same quote rules as the parser, plus the line of a
+ * quoted field that is never closed. Such a field would silently swallow every following row, so the
+ * file is rejected instead of guessing where the records end.
+ */
+function scanCsv(text: string): { records: number; unterminatedLine: number | null } {
+  let records = 0;
   let inQuotes = false;
+  let atFieldStart = true;
   let empty = true;
+  let line = 1;
+  let quoteLine = 0;
   for (let i = 0; i < text.length; i++) {
     const c = text.charCodeAt(i);
-    if (c === 34) inQuotes = !inQuotes;
-    if (!inQuotes && (c === 10 || c === 13)) {
-      if (c === 13 && text.charCodeAt(i + 1) === 10) i++;
-      if (!empty) n++;
+    if (c === 10 || (c === 13 && text.charCodeAt(i + 1) !== 10)) line++;
+    if (inQuotes) {
+      if (c === 34) {
+        if (text.charCodeAt(i + 1) === 34) i++;
+        else inQuotes = false;
+      }
+      continue;
+    }
+    if (c === 34 && atFieldStart) {
+      inQuotes = true;
+      quoteLine = line;
+      atFieldStart = false;
+      empty = false;
+    } else if (c === 10 || c === 13) {
+      if (c === 13 && text.charCodeAt(i + 1) === 10) {
+        i++;
+        line++;
+      }
+      if (!empty) records++;
       empty = true;
-    } else empty = false;
+      atFieldStart = true;
+    } else {
+      atFieldStart = c === 44;
+      empty = false;
+    }
   }
-  return empty ? n : n + 1;
+  if (inQuotes) return { records, unterminatedLine: quoteLine };
+  return { records: empty ? records : records + 1, unterminatedLine: null };
 }
 
 const camel = (k: string) =>
@@ -82,29 +124,37 @@ const camel = (k: string) =>
     .replace(/[_\-\s]+([a-zA-Z0-9])/g, (_, c: string) => c.toUpperCase())
     .replace(/^[A-Z]/, (c) => c.toLowerCase());
 
+const isMissing = (v: unknown) => v === undefined || v === null || v === "";
+const WHOLE = /^-?\d+$/;
+const DECIMAL = /^[+-]?(\d+(\.\d*)?|\.\d+)$/;
+
+/**
+ * A list of whole numbers from a JSON array or "1, 2 3;4|5" text. Every element must be a whole number
+ * written in decimal: a blank element is an error, never 0 (it would fabricate e.g. a clicked tile #0).
+ */
 function intList(v: unknown, field: string): number[] | null {
-  if (v === undefined || v === null || v === "") return null;
-  if (Array.isArray(v)) {
-    if (v.length > 1000) throw new Error(`${field}: too many values`);
-    return v.map((x) => {
-      const n = typeof x === "number" ? x : Number(String(x).trim());
-      if (!Number.isSafeInteger(n)) throw new Error(`${field}: "${x}" is not a whole number`);
-      return n;
-    });
-  }
-  const tokens = String(v).split(/[\s,;|]+/).filter(Boolean);
+  if (isMissing(v)) return null;
+  const tokens: unknown[] = Array.isArray(v) ? v : String(v).split(/[\s,;|]+/).filter(Boolean);
   if (tokens.length > 1000) throw new Error(`${field}: too many values`);
-  return tokens.map((t) => {
-    if (!/^-?\d+$/.test(t) || !Number.isSafeInteger(Number(t))) throw new Error(`${field}: "${t}" is not a whole number`);
-    return Number(t);
+  return tokens.map((x) => {
+    const n = typeof x === "number" ? x : typeof x === "string" && WHOLE.test(x.trim()) ? Number(x.trim()) : NaN;
+    if (!Number.isSafeInteger(n)) throw new Error(`${field}: ${JSON.stringify(x) ?? String(x)} is not a whole number`);
+    return n;
   });
 }
 
+/** A decimal number ("1.25", "1.25x"). Blank text is missing, never 0; hex, exponents and words are rejected. */
 function num(v: unknown, field: string): number | null {
-  if (v === undefined || v === null || v === "") return null;
-  const n = typeof v === "number" ? v : Number(String(v).trim().replace(/x$/i, ""));
-  if (!Number.isFinite(n)) throw new Error(`${field}: "${v}" is not a number`);
-  return n;
+  if (isMissing(v)) return null;
+  if (typeof v === "number") {
+    if (!Number.isFinite(v)) throw new Error(`${field}: "${v}" is not a number`);
+    return v;
+  }
+  const text = typeof v === "string" ? v.trim() : null;
+  if (text === "") return null;
+  const t = text?.replace(/x$/i, "") ?? "";
+  if (!DECIMAL.test(t)) throw new Error(`${field}: ${JSON.stringify(v) ?? String(v)} is not a decimal number`);
+  return Number(t);
 }
 
 /**
@@ -112,7 +162,7 @@ function num(v: unknown, field: string): number | null {
  * has already lost digits inside JSON.parse, so it is rejected with an explanation (v1 bug F-05).
  */
 function exactText(v: unknown, field: string): string | null {
-  if (v === undefined || v === null || v === "") return null;
+  if (isMissing(v)) return null;
   if (typeof v === "number") {
     if (!Number.isSafeInteger(v)) {
       throw new Error(`${field} ${v} is a JSON number that cannot be represented exactly (beyond 2^53 or not an integer); supply it as a string, e.g. "${field}": "…"`);
@@ -123,7 +173,29 @@ function exactText(v: unknown, field: string): string | null {
   throw new Error(`${field} must be text`);
 }
 
-const opt = (v: unknown) => (v === undefined || v === null || v === "" ? null : String(v));
+const opt = (v: unknown) => (isMissing(v) ? null : String(v));
+const same = <T>(v: T) => v;
+
+/**
+ * Several column names are accepted for one field (e.g. serverSeed / revealedServerSeed). When a record
+ * fills more than one of them with different values, which one is right is unknown: the row is rejected
+ * instead of letting the first alias silently win and discarding conflicting evidence.
+ */
+function pick<T>(field: string, candidates: [name: string, value: unknown][], parse: (v: unknown) => T | null): T | null {
+  let chosen: { name: string; value: T; key: string } | null = null;
+  for (const [name, raw] of candidates) {
+    if (isMissing(raw)) continue;
+    const value = parse(raw);
+    if (value === null) continue;
+    const key = JSON.stringify(value) ?? String(value);
+    if (!chosen) chosen = { name, value, key };
+    else if (key !== chosen.key) {
+      const show = (k: string) => (k.length > 60 ? `${k.slice(0, 57)}...` : k);
+      throw new Error(`${field}: columns "${chosen.name}" and "${name}" disagree (${show(chosen.key)} vs ${show(key)}). Correct the record; the Lab does not choose between conflicting values.`);
+    }
+  }
+  return chosen?.value ?? null;
+}
 
 const VERSION_LABELS: Record<string, string> = {
   hmac_sha256_v2: "hmac_sha256_v2",
@@ -134,79 +206,81 @@ const VERSION_LABELS: Record<string, string> = {
   legacy: "seedrandom_v1",
 };
 
+function parseCards(src: unknown): { label: string; suit: string }[] | null {
+  if (Array.isArray(src) && src.every((c) => typeof c === "object" && c !== null)) return src as { label: string; suit: string }[];
+  const { cards, errors } = parseCardList(String(src));
+  if (errors.length) throw new Error(errors.join("; "));
+  return cards;
+}
+
 /** Converts a flat or nested record (any key casing) into the verifier's RoundInput shape. */
 export function normalizeRecord(raw: Record<string, unknown>): Record<string, unknown> {
   const r: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(raw)) r[camel(k)] = v;
   const reportedObj = (typeof r.reported === "object" && r.reported !== null ? r.reported : {}) as Record<string, unknown>;
+  const c = (...names: string[]): [string, unknown][] => names.map((n) => (n.startsWith("reported.") ? [n, reportedObj[n.slice(9)]] : [n, r[n]]));
 
   const game = String(r.game ?? "").trim().toLowerCase();
   const out: Record<string, unknown> = {
     game,
-    roundId: exactText(r.roundId ?? r.id ?? r.gameId, "roundId"),
-    serverSeed: r.serverSeed ?? r.revealedServerSeed,
-    clientSeed: r.clientSeed ?? r.publicSeed,
-    commitment: opt(r.commitment ?? r.serverSeedHash ?? r.hashedServerSeed),
-    timestamp: opt(r.timestamp ?? r.time ?? r.createdAt),
-    source: opt(r.source ?? r.evidenceSource),
-    txSignature: opt(r.txSignature ?? r.signature),
+    roundId: pick("roundId", c("roundId", "id", "gameId"), (v) => exactText(v, "roundId")),
+    // seeds are copied exactly (no trimming); a missing seed stays undefined so the schema reports it as required
+    serverSeed: pick("server seed", c("serverSeed", "revealedServerSeed"), same) ?? undefined,
+    clientSeed: pick("client seed", c("clientSeed", "publicSeed"), same) ?? undefined,
+    commitment: pick("commitment", c("commitment", "serverSeedHash", "hashedServerSeed"), opt),
+    timestamp: pick("timestamp", c("timestamp", "time", "createdAt"), opt),
+    source: pick("source", c("source", "evidenceSource"), opt),
+    txSignature: pick("txSignature", c("txSignature", "signature"), opt),
   };
   const nonce = exactText(r.nonce, "nonce");
   if (nonce !== null) out.nonce = nonce;
-  if (r.algorithmVersion !== undefined && r.algorithmVersion !== "") {
+  if (!isMissing(r.algorithmVersion)) {
     const label = String(r.algorithmVersion).trim().toLowerCase();
     out.algorithmVersion = VERSION_LABELS[label] ?? String(r.algorithmVersion);
   }
 
-  const generic = r.reportedOutcome ?? r.outcome ?? r.result;
+  const genericNames = ["reportedOutcome", "outcome", "result"];
   switch (game) {
     case "crash": {
-      const m = num(r.reportedMultiplier ?? reportedObj.multiplier ?? r.multiplier ?? generic, "reported multiplier");
+      const m = pick("reported multiplier", c("reportedMultiplier", "reported.multiplier", "multiplier", ...genericNames), (v) => num(v, "reported multiplier"));
       out.reported = m === null ? null : { multiplier: m };
       break;
     }
     case "blackjack": {
-      const cc = num(r.cardCount ?? r.numberOfCards, "card count");
+      const cc = pick("card count", c("cardCount", "numberOfCards"), (v) => num(v, "card count"));
       if (cc !== null) out.cardCount = cc;
-      const src = r.reportedCards ?? reportedObj.cards ?? r.cards ?? generic;
-      if (Array.isArray(src) && src.every((c) => typeof c === "object" && c !== null)) out.reported = { cards: src };
-      else if (src !== undefined && src !== null && src !== "") {
-        const { cards, errors } = parseCardList(String(src));
-        if (errors.length) throw new Error(errors.join("; "));
-        out.reported = { cards };
-      }
-      if (out.cardCount === undefined) {
-        const n = (out.reported as { cards?: unknown[] } | undefined)?.cards?.length;
-        out.cardCount = n && n > 0 ? n : 10;
-      }
+      const cards = pick("reported cards", c("reportedCards", "reported.cards", "cards", ...genericNames), parseCards);
+      if (cards !== null) out.reported = { cards };
+      if (out.cardCount === undefined) out.cardCount = cards && cards.length > 0 ? cards.length : 10;
       break;
     }
     case "keno": {
-      out.difficulty = String(r.difficulty ?? r.risk ?? "").trim().toUpperCase() || undefined;
-      out.selectedNumbers = intList(r.selectedNumbers ?? r.picks ?? r.selected, "selected numbers");
-      const d = intList(r.reportedDraw ?? reportedObj.draw ?? r.drawn ?? r.winningNumbers ?? generic, "reported draw");
+      out.difficulty = pick("difficulty", c("difficulty", "risk"), (v) => String(v).trim().toUpperCase() || null) ?? undefined;
+      out.selectedNumbers = pick("selected numbers", c("selectedNumbers", "picks", "selected"), (v) => intList(v, "selected numbers"));
+      const d = pick("reported draw", c("reportedDraw", "reported.draw", "drawn", "winningNumbers", ...genericNames), (v) => intList(v, "reported draw"));
       out.reported = d ? { draw: d } : null;
       break;
     }
     case "mines": {
       const g = num(r.gridSize, "grid size");
-      const tc = num(r.tileCount ?? r.tiles, "tile count");
+      const tc = pick("tile count", c("tileCount", "tiles"), (v) => num(v, "tile count"));
+      if (g !== null && tc !== null && g * g !== tc) throw new Error(`grid size ${g} (${g * g} tiles) disagrees with tile count ${tc}`);
       out.gridSize = g ?? (tc !== null ? gridSizeFromTileCount(tc) ?? -1 : undefined);
       // "mines" is ambiguous: a number is the mine count, a list is the reported positions (v1 bug F-08).
       const minesField = r.mines;
       const minesIsList = Array.isArray(minesField) || (typeof minesField === "string" && /[\s,;|]/.test(minesField.trim()));
-      out.mineCount = num(r.mineCount ?? r.minesCount ?? (minesIsList ? undefined : minesField), "mine count") ?? undefined;
-      const base = num(r.indexBase, "index base");
-      out.indexBase = base ?? 0;
-      out.clickedTiles = intList(r.clickedTiles ?? r.revealedTiles ?? r.selectedTiles, "clicked tiles");
-      const genericText = opt(generic)?.trim().toLowerCase() ?? null;
-      const genericIsResult = genericText === "win" || genericText === "loss";
-      const mines = intList(
-        r.reportedMines ?? reportedObj.mines ?? r.minePositions ?? (minesIsList ? minesField : undefined) ?? (genericIsResult ? null : generic),
+      out.mineCount = pick("mine count", [...c("mineCount", "minesCount"), ["mines", minesIsList ? undefined : minesField]], (v) => num(v, "mine count")) ?? undefined;
+      out.indexBase = num(r.indexBase, "index base") ?? 0;
+      out.clickedTiles = pick("clicked tiles", c("clickedTiles", "revealedTiles", "selectedTiles"), (v) => intList(v, "clicked tiles"));
+      const generic = c(...genericNames).filter(([, v]) => !isMissing(v));
+      const isResult = (v: unknown) => ["win", "loss"].includes(String(v).trim().toLowerCase());
+      const mines = pick(
         "reported mines",
+        [...c("reportedMines", "reported.mines", "minePositions"), ["mines", minesIsList ? minesField : undefined], ...generic.filter(([, v]) => !isResult(v))],
+        (v) => intList(v, "reported mines"),
       );
       if (out.mineCount === undefined && mines) out.mineCount = mines.length;
-      const res = opt(r.reportedResult ?? reportedObj.outcome ?? (genericIsResult ? genericText : null))?.trim().toLowerCase() ?? null;
+      const res = pick("reported result", [...c("reportedResult", "reported.outcome"), ...generic.filter(([, v]) => isResult(v))], (v) => String(v).trim().toLowerCase());
       if (res !== null && res !== "win" && res !== "loss") throw new Error(`reported result must be "win" or "loss" (got "${res}")`);
       out.reported = mines || res ? { mines, outcome: res } : null;
       break;
@@ -279,20 +353,36 @@ export function openImport(input: string, format: ImportFormat): ImportSource {
     };
   }
 
-  const records = countCsvRecords(text);
+  const { records, unterminatedLine } = scanCsv(text);
+  if (unterminatedLine !== null) {
+    return {
+      format: fmt,
+      total: 1,
+      rows: [{ line: unterminatedLine, error: `A quoted field opened on line ${unterminatedLine} is never closed, so the rows after it cannot be separated reliably. Nothing was imported; close the quote (or escape it as "") and retry.` }],
+    };
+  }
   if (records < 2) return { format: fmt, total: 1, rows: [{ line: 0, error: "CSV needs a header row and at least one data row" }] };
+  const first = iterateCsvRecords(text).next();
+  const headerCells = first.done ? [] : first.value.cells.map((h) => h.trim());
+  const seen = new Map<string, string>();
+  for (const h of headerCells) {
+    const key = camel(h);
+    if (key === "") continue; // unnamed (e.g. trailing-comma) columns carry no field
+    if (seen.has(key)) {
+      return { format: fmt, total: 1, rows: [{ line: 1, error: `Columns "${seen.get(key)}" and "${h}" name the same field; one would silently overwrite the other. Remove or rename one.` }] };
+    }
+    seen.set(key, h);
+  }
   return {
     format: fmt,
     total: records - 1,
     rows: (function* () {
       let header: string[] | null = null;
-      let i = 0;
-      for (const cells of iterateCsv(text)) {
+      for (const { cells, line } of iterateCsvRecords(text)) {
         if (!header) {
-          header = cells.map((h) => h.trim());
+          header = headerCells;
           continue;
         }
-        const line = i++ + 2;
         if (cells.length !== header.length) {
           yield { line, error: `Expected ${header.length} columns, found ${cells.length}` };
           continue;

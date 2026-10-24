@@ -21,6 +21,7 @@ import type {
   VerificationResult,
 } from "../../../shared/src/contracts.js";
 import { MIGRATIONS, SCHEMA_VERSION, V0_SCHEMA } from "./migrations.js";
+import { NUMERIC_NONCE_KEY, nonceFromKey } from "../auditing/integrity.js";
 
 export type { Settings, StoredRound } from "../../../shared/src/contracts.js";
 
@@ -447,20 +448,20 @@ export class FairnessDb {
     const rows = this.db
       .prepare(
         `SELECT game, server_seed, client_seed, COUNT(*) AS rounds,
-           group_concat(DISTINCT algorithm_version) AS versions,
-           MIN(CASE WHEN nonce NOT GLOB '*[^0-9]*' AND nonce <> '' THEN CAST(nonce AS INTEGER) END) AS nmin,
-           MAX(CASE WHEN nonce NOT GLOB '*[^0-9]*' AND nonce <> '' THEN CAST(nonce AS INTEGER) END) AS nmax,
+           json_group_array(DISTINCT algorithm_version) AS versions,
+           MIN(${NUMERIC_NONCE_KEY}) AS nmin, MAX(${NUMERIC_NONCE_KEY}) AS nmax,
            MIN(round_timestamp) AS first_seen, MAX(round_timestamp) AS last_seen,
            SUM(commitment IS NOT NULL) AS commitments, COUNT(DISTINCT commitment) AS distinct_commitments,
            SUM(outcome_status = 'mismatch') AS mismatches,
-           group_concat(DISTINCT evidence_source) AS sources,
+           json_group_array(DISTINCT evidence_source) AS sources,
            COUNT(*) - COUNT(DISTINCT COALESCE(nonce, '#' || id)) AS nonce_repeats
          FROM rounds ${where}
          GROUP BY game, server_seed, client_seed
          ORDER BY MAX(id) DESC LIMIT ? OFFSET ?`,
       )
       .all(...params, f.limit ?? 50, f.offset ?? 0) as Record<string, string | number | null>[];
-    const split = (v: unknown) => (typeof v === "string" && v ? v.split(",") : []);
+    // JSON arrays, not comma-joined text: an evidence source such as "export, page 2" must stay one value
+    const split = (v: unknown) => (typeof v === "string" ? (JSON.parse(v) as (string | null)[]).filter((x): x is string => typeof x === "string" && x !== "") : []);
     return {
       total,
       sessions: rows.map((r) => {
@@ -475,8 +476,8 @@ export class FairnessDb {
           clientSeed: String(r.client_seed ?? ""),
           rounds: Number(r.rounds),
           versions: split(r.versions),
-          nonceMin: r.nmin === null ? null : String(r.nmin),
-          nonceMax: r.nmax === null ? null : String(r.nmax),
+          nonceMin: nonceFromKey(r.nmin),
+          nonceMax: nonceFromKey(r.nmax),
           firstSeen: (r.first_seen as string | null) ?? null,
           lastSeen: (r.last_seen as string | null) ?? null,
           commitments: Number(r.commitments),

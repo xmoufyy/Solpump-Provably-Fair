@@ -50,7 +50,7 @@ export function HmacInspectorPage() {
   return (
     <div>
       <PageHeader icon={<Binary className="h-5 w-5" />} title="HMAC Inspector" subtitle="Recompute any single HMAC step of any game by hand. Presets reproduce exactly what the verifiers do; nothing here changes how results are calculated." />
-      <div className="grid gap-6 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <Card>
           <CardHeader><CardTitle>Presets from seeds</CardTitle></CardHeader>
           <CardContent className="space-y-3">

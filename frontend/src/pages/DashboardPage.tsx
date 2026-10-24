@@ -45,7 +45,7 @@ export function DashboardPage({ go }: { go: (r: string) => void }) {
                 <div className="text-sm text-muted">Verify a round and save it, or import your Solpump history in Batch Verification.</div>
               </div>
             </div>
-            <div className="flex gap-2 text-sm">
+            <div className="flex flex-wrap gap-2 text-sm">
               {["keno", "mines", "crash", "blackjack", "batch"].map((r) => (
                 <button key={r} onClick={() => go(r)} className="cursor-pointer rounded-lg border border-line px-3 py-1.5 capitalize hover:border-accent/60">
                   {r}

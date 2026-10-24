@@ -32,7 +32,7 @@ export function BlackjackPage() {
         title="Blackjack Verification"
         subtitle="Each card number n (starting at 1) gets its own HMAC-SHA256(serverSeed, clientSeed ‖ n). Rank = h mod 13, suit = h mod 4. There is no shuffled deck, so the same card can appear more than once."
       />
-      <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[360px_1fr]">
         <Card>
           <CardContent className="space-y-5">
             <SeedFields value={seeds} onChange={setSeeds} errors={errors} withNonce={false} clientLabel="Public / Client Seed" />
@@ -47,7 +47,7 @@ export function BlackjackPage() {
               <FieldError>{reportedErr}</FieldError>
             </div>
             <p className="text-xs text-muted">Player/dealer assignment is not reconstructed: the published algorithm defines the numbered card sequence only.</p>
-            <VerifyBar onRun={() => ok() && v.run(input)} onSave={() => ok() && v.run(input, true)} busy={v.busy} saved={v.saved} error={v.error} />
+            <VerifyBar onRun={() => ok() && v.run(input)} onSave={() => ok() && v.run(input, true)} busy={v.busy} saved={v.saved} error={v.error} stale={stale} />
           </CardContent>
         </Card>
         <div className="space-y-6">

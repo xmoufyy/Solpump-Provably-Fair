@@ -92,6 +92,8 @@ export class ImportJobs {
           job.status = "running";
         }
         if (c.cancelled) break;
+        // Counters describe committed rows only: a chunk that rolls back must not leave its rows counted.
+        const before = { processed: job.processed, stored: job.stored, rejected: job.rejected, duplicates: job.duplicates, errors: job.errors.length, errorsTruncated: job.errorsTruncated, outcomeCounts: { ...job.outcomeCounts } };
         this.db.db.exec("BEGIN IMMEDIATE");
         try {
           const sliceStart = performance.now();
@@ -121,6 +123,7 @@ export class ImportJobs {
           this.db.db.exec("COMMIT");
         } catch (e) {
           this.db.db.exec("ROLLBACK");
+          Object.assign(job, { ...before, errors: job.errors.slice(0, before.errors) });
           throw e;
         }
         this.db.updateImport(job);
