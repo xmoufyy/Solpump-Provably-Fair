@@ -71,7 +71,7 @@ test("Mines: 1-based report and clicked tiles keep provenance; outcome derived f
   await expect(page.getByTestId("mine-tile-0")).toHaveClass(/opacity-25/);
 });
 
-test("Batch: a large import runs in the background and can be paused, resumed and cancelled", async ({ page }) => {
+test("Batch: a large import is uploaded in chunks and can be paused, resumed and cancelled", async ({ page }) => {
   const lines = ["round_id,game,server_seed,client_seed,reported_outcome,source"];
   for (let i = 0; i < 30000; i++) lines.push(`e2e-${i},crash,seed-${i},client,1.00,e2e bulk`);
   await page.goto("/#/batch");

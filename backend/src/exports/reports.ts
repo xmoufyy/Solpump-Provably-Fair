@@ -23,9 +23,9 @@ export function csvCell(v: unknown): string {
   return /[",\r\n]/.test(s) || /^\s|\s$/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-export function* csvLines(rounds: Iterable<RoundSummary>): Generator<string> {
+export async function* csvLines(rounds: AsyncIterable<RoundSummary> | Iterable<RoundSummary>): AsyncGenerator<string> {
   yield CSV_COLUMNS.join(",") + "\r\n";
-  for (const r of rounds) {
+  for await (const r of rounds) {
     yield [
       r.id, r.roundId, r.game, r.algorithmVersion, r.nonce, r.serverSeed, r.clientSeed, r.recordedSummary, r.calculatedSummary,
       r.outcomeStatus, r.commitmentStatus, r.timingStatus, r.overallStatus, r.evidenceSource, r.roundTimestamp, r.auditedAt, r.importBatchId,

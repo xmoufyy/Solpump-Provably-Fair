@@ -2,8 +2,9 @@
  * Security regression tests (audit findings S-xx). Each was run against v1 first.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { removeTempDir } from "./cleanup.js";
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildApp } from "../../src/api/app.js";
@@ -14,12 +15,12 @@ let ctx: Awaited<ReturnType<typeof buildApp>>;
 const S = "SERVER_TEST_2026", C = "CLIENT_TEST_2026";
 
 beforeAll(async () => {
-  ctx = await buildApp({ db: new FairnessDb(join(dir, "sec.db")) });
+  ctx = await buildApp({ db: await FairnessDb.open(join(dir, "sec.db")) });
 });
 afterAll(async () => {
   await ctx.app.close();
-  ctx.db.db.close();
-  rmSync(dir, { recursive: true, force: true });
+  ctx.db.close();
+  removeTempDir(dir);
 });
 
 const save = (input: Record<string, unknown>) => ctx.app.inject({ method: "POST", url: "/api/verify", payload: { input, save: true } });

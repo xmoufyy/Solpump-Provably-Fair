@@ -1,8 +1,6 @@
-import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { summarizeOutcome } from "../../../shared/src/parsing.js";
 import type {
   CalculatedByGame,
@@ -21,16 +19,18 @@ import type {
   VerificationResult,
 } from "../../../shared/src/contracts.js";
 import { MIGRATIONS, SCHEMA_VERSION, V0_SCHEMA } from "./migrations.js";
+import { Sql, type Param, type Statement } from "./sql.js";
 import { NUMERIC_NONCE_KEY, nonceFromKey } from "../auditing/integrity.js";
 
 export type { Settings, StoredRound } from "../../../shared/src/contracts.js";
-
-const DEFAULT_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "../../../data/fairness-lab.db");
 
 const DEFAULT_SETTINGS: Settings = {
   commitmentScheme: "unconfirmed",
   solanaRpcUrl: "https://api.mainnet-beta.solana.com",
 };
+
+/** A running import with no chunk received for this long is shown as interrupted (its uploader stopped). */
+export const IMPORT_STALE_MS = 10 * 60 * 1000;
 
 export interface RoundFilter {
   game?: string;
@@ -77,66 +77,75 @@ function compactResult(r: VerificationResult) {
 const SUMMARY_COLUMNS =
   "id, round_id, game, algorithm_version, nonce, server_seed, client_seed, outcome_status, commitment_status, timing_status, overall_status, evidence_source, round_timestamp, audited_at, import_batch_id, recorded_json, calculated_json";
 
+/** Rows per page when streaming large result sets (keyset pagination keeps memory flat, locally and hosted). */
+const PAGE = 1000;
+
+/** Where the database lives: a hosted libSQL/Turso URL when configured, otherwise the local SQLite file in SFL_DB_PATH. */
+export function databaseLocation(): { url: string; authToken?: string } {
+  const remote = process.env.TURSO_DATABASE_URL ?? process.env.SFL_DB_URL;
+  if (remote) return { url: remote, authToken: process.env.TURSO_AUTH_TOKEN };
+  // Serverless file systems are read-only or discarded between requests: records written there would be lost.
+  if (process.env.VERCEL) throw new Error("No database configured: set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN for this deployment.");
+  // The local default (data/fairness-lab.db) is set by the local entry point, server.ts. It is deliberately not
+  // referenced here, so deployment bundlers that trace file paths from this module never pack a local database.
+  if (!process.env.SFL_DB_PATH) throw new Error("No database configured: set SFL_DB_PATH (local file) or TURSO_DATABASE_URL (hosted).");
+  return { url: process.env.SFL_DB_PATH };
+}
+
 export class FairnessDb {
-  readonly db: DatabaseSync;
-  readonly path: string;
   /** set when opening this database required a schema migration */
-  readonly migration: { from: number; to: number; backup: string | null } | null = null;
-  /** incremented on every write; lets callers cache derived data (stats, integrity) safely */
-  revision = 0;
-  private statements = new Map<string, StatementSync>();
+  migration: { from: number; to: number; backup: string | null } | null = null;
 
-  /** Prepared-statement cache: compiling SQL on every row cost ~25% of import time. */
-  private stmt(sql: string): StatementSync {
-    let s = this.statements.get(sql);
-    if (!s) {
-      s = this.db.prepare(sql);
-      this.statements.set(sql, s);
+  private constructor(readonly sql: Sql) {}
+
+  /** Opens (creating and migrating if needed) a database: a file path, ":memory:", or a remote libSQL URL. */
+  static async open(location: string | { url: string; authToken?: string } = databaseLocation()): Promise<FairnessDb> {
+    const { url, authToken } = typeof location === "string" ? { url: location, authToken: undefined } : location;
+    const isRemote = /^(libsql|https?|wss?):\/\//i.test(url);
+    if (!isRemote && url !== ":memory:") mkdirSync(dirname(url.replace(/^file:/, "")), { recursive: true });
+    const db = new FairnessDb(Sql.connect(url, authToken));
+    if (db.sql.local) {
+      // WAL + synchronous=NORMAL: never corrupts; an application crash loses nothing; an OS crash or power loss can
+      // lose only the most recent commits. Per-commit fsync (FULL) made imports ~2x slower on Windows.
+      await db.sql.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+      // 64 MB page cache (default 2 MB): random fingerprint keys made index pages thrash past ~50k rows.
+      await db.sql.exec("PRAGMA cache_size = -65536; PRAGMA temp_store = MEMORY;");
     }
-    return s;
-  }
-
-  constructor(path = process.env.SFL_DB_PATH ?? DEFAULT_PATH) {
-    this.path = path;
-    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
-    // WAL + synchronous=NORMAL: never corrupts; an application crash loses nothing; an OS crash or power loss can
-    // lose only the most recent commits. Per-commit fsync (FULL) made imports ~2x slower on Windows.
-    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
-    // 64 MB page cache (default 2 MB): random fingerprint keys made index pages thrash past ~50k rows.
-    this.db.exec("PRAGMA cache_size = -65536; PRAGMA temp_store = MEMORY;");
     // base (v0) schema only for new or legacy files; later versions are reached through migrations
-    if (this.schemaVersion === 0) this.db.exec(V0_SCHEMA);
-    this.migration = this.migrate();
-    // Jobs that were running when the process stopped can never resume; mark them honestly.
-    this.db.prepare("UPDATE imports SET status = 'interrupted', finished_at = ? WHERE status IN ('running','paused')").run(new Date().toISOString());
+    if ((await db.schemaVersion()) === 0) await db.sql.exec(V0_SCHEMA);
+    db.migration = await db.migrate();
+    return db;
   }
 
-  get schemaVersion(): number {
-    return (this.db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+  get local(): boolean {
+    return this.sql.local;
+  }
+
+  close() {
+    this.sql.close();
+  }
+
+  async schemaVersion(): Promise<number> {
+    return Number((await this.sql.get<{ user_version: number }>("PRAGMA user_version"))?.user_version ?? 0);
   }
 
   /**
-   * Forward migration with a backup taken first whenever the database already holds data.
-   * Each migration runs in a single transaction: it either fully applies or leaves the file untouched.
+   * Forward migration with a backup taken first whenever a local database already holds data.
+   * Each migration runs in one atomic batch: it either fully applies or leaves the database untouched.
    */
-  private migrate(): { from: number; to: number; backup: string | null } | null {
-    const from = this.schemaVersion;
+  private async migrate(): Promise<{ from: number; to: number; backup: string | null } | null> {
+    const from = await this.schemaVersion();
     if (from > SCHEMA_VERSION) {
       throw new Error(`Database schema v${from} is newer than this application (v${SCHEMA_VERSION}). Refusing to modify it; use a newer version of the app.`);
     }
     if (from === SCHEMA_VERSION) return null;
     let backup: string | null = null;
-    const hasData = (this.db.prepare("SELECT (SELECT COUNT(*) FROM rounds) + (SELECT COUNT(*) FROM imports) AS n").get() as { n: number }).n > 0;
-    if (hasData && this.path !== ":memory:") backup = this.backup(`pre-v${SCHEMA_VERSION}`);
+    const hasData = Number((await this.sql.get<{ n: number }>("SELECT (SELECT COUNT(*) FROM rounds) + (SELECT COUNT(*) FROM imports) AS n"))?.n) > 0;
+    if (hasData && this.sql.file !== null) backup = await this.backup(`pre-v${SCHEMA_VERSION}`);
     for (const m of MIGRATIONS.filter((x) => x.version > from)) {
-      this.db.exec("BEGIN IMMEDIATE");
       try {
-        m.up(this.db);
-        this.db.exec(`PRAGMA user_version = ${m.version}`);
-        this.db.exec("COMMIT");
+        await this.sql.batch([...(await m.up(this.sql)), `PRAGMA user_version = ${m.version}`]);
       } catch (e) {
-        this.db.exec("ROLLBACK");
         throw new Error(`Migration to v${m.version} failed and was rolled back${backup ? `; backup at ${backup}` : ""}: ${(e as Error).message}`);
       }
     }
@@ -144,69 +153,90 @@ export class FairnessDb {
   }
 
   /** Reverts to schema `target` (used by tests and documented as the rollback path). */
-  migrateDown(target: number) {
-    for (const m of [...MIGRATIONS].reverse().filter((x) => x.version > target && x.version <= this.schemaVersion)) {
-      this.db.exec("BEGIN IMMEDIATE");
-      try {
-        m.down(this.db);
-        this.db.exec(`PRAGMA user_version = ${m.version - 1}`);
-        this.db.exec("COMMIT");
-      } catch (e) {
-        this.db.exec("ROLLBACK");
-        throw e;
-      }
+  async migrateDown(target: number) {
+    const current = await this.schemaVersion();
+    for (const m of [...MIGRATIONS].reverse().filter((x) => x.version > target && x.version <= current)) {
+      await this.sql.batch([...(await m.down(this.sql)), `PRAGMA user_version = ${m.version - 1}`]);
     }
   }
 
-  /** Consistent online snapshot via VACUUM INTO. Returns the backup path. */
-  backup(tag = "manual"): string {
-    if (this.path === ":memory:") throw new Error("in-memory database cannot be backed up");
-    const dir = join(dirname(this.path), "backups");
+  /** Consistent online snapshot of a local database via VACUUM INTO. Returns the backup path. */
+  async backup(tag = "manual"): Promise<string> {
+    if (this.sql.file === null) {
+      throw new Error(
+        this.sql.local
+          ? "An in-memory database cannot be backed up."
+          : "This is a hosted database: backups and point-in-time restore are provided by the database service (Turso dashboard or CLI). Use the JSON export for a portable copy of the records.",
+      );
+    }
+    const dir = join(dirname(this.sql.file), "backups");
     mkdirSync(dir, { recursive: true });
     const file = join(dir, `fairness-lab-${tag}-${new Date().toISOString().replace(/[:.]/g, "-")}.db`);
     if (existsSync(file)) throw new Error("backup already exists");
-    this.db.prepare("VACUUM INTO ?").run(file);
+    await this.sql.run("VACUUM INTO ?", file);
     return file;
   }
 
+  /**
+   * Changes whenever round data changes (insert, re-audit, delete). Derived views (stats, integrity) are cached
+   * against it. It is read from the database rather than kept in memory so that several server instances
+   * (serverless) can never serve each other's stale results. Re-audits always write a newer audited_at.
+   */
+  async dataVersion(): Promise<string> {
+    const r = await this.sql.get<Record<string, unknown>>("SELECT COUNT(*) AS n, MAX(id) AS id, MAX(audited_at) AS at FROM rounds");
+    return `${r?.n}:${r?.id}:${r?.at}`;
+  }
+
   /* ------------------------------------------------------------------ settings */
-  getSettings(): Settings {
-    const rows = this.stmt("SELECT key, value FROM settings").all() as { key: string; value: string }[];
+  async getSettings(): Promise<Settings> {
+    const rows = await this.sql.all<{ key: string; value: string }>("SELECT key, value FROM settings");
     const s: Record<string, unknown> = { ...DEFAULT_SETTINGS };
     for (const r of rows) if (r.key in DEFAULT_SETTINGS) s[r.key] = JSON.parse(r.value);
     return s as unknown as Settings;
   }
 
-  setSettings(patch: Partial<Settings>) {
-    const stmt = this.db.prepare("INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
-    for (const [k, v] of Object.entries(patch)) if (v !== undefined) stmt.run(k, JSON.stringify(v));
+  async setSettings(patch: Partial<Settings>) {
+    await this.sql.batch(
+      Object.entries(patch)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => ({ sql: "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", args: [k, JSON.stringify(v)] })),
+    );
     return this.getSettings();
   }
 
   /* ------------------------------------------------------------------ rounds */
-  findByFingerprint(fp: string): number | null {
-    const r = this.stmt("SELECT id FROM rounds WHERE fingerprint = ? LIMIT 1").get(fp) as { id: number } | undefined;
+  async findByFingerprint(fp: string): Promise<number | null> {
+    const r = await this.sql.get<{ id: number }>("SELECT id FROM rounds WHERE fingerprint = ? LIMIT 1", fp);
     return r?.id ?? null;
   }
 
+  /** Which of these fingerprints are already stored (looked up in bounded groups). */
+  async existingFingerprints(fps: string[]): Promise<Set<string>> {
+    const found = new Set<string>();
+    const unique = [...new Set(fps)];
+    for (let i = 0; i < unique.length; i += 500) {
+      const group = unique.slice(i, i + 500);
+      const rows = await this.sql.all<{ fingerprint: string }>(`SELECT DISTINCT fingerprint FROM rounds WHERE fingerprint IN (${group.map(() => "?").join(",")})`, ...group);
+      for (const r of rows) found.add(r.fingerprint);
+    }
+    return found;
+  }
+
   /**
-   * Stores a verification. Inputs, recorded outcome and calculated outcome live in their own
-   * columns; result_json holds the rest (statuses, comparisons, commitment, and the trace only
-   * when `storeTrace`). Traces of imported rounds are regenerated on demand from the inputs.
+   * The INSERT for a verification. Inputs, recorded outcome and calculated outcome live in their own
+   * columns; result_json holds the rest (statuses, comparisons, commitment, and the trace only when
+   * `storeTrace`). Traces of imported rounds are regenerated on demand from the inputs.
    */
-  insertRound(result: VerificationResult, importBatchId: string | null = null, storeTrace = true): number {
+  insertStatement(result: VerificationResult, importBatchId: string | null = null, storeTrace = true): Statement {
     const inputs = (result.inputs ?? {}) as Record<string, unknown>;
     const str = (v: unknown) => (typeof v === "string" ? v : v == null ? null : String(v));
     const { inputs: _i, calculated, reported, trace, ...rest } = result;
     void _i;
-    this.revision++;
-    const info = this
-      .stmt(
-        `INSERT INTO rounds (round_id, game, algorithm_version, nonce, server_seed, client_seed, outcome_status, commitment_status,
+    return {
+      sql: `INSERT INTO rounds (round_id, game, algorithm_version, nonce, server_seed, client_seed, outcome_status, commitment_status,
           timing_status, overall_status, evidence_source, round_timestamp, audited_at, import_batch_id, inputs_json, recorded_json,
           calculated_json, result_json, fingerprint, commitment, trace_stored) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      )
-      .run(
+      args: [
         result.roundId,
         String(result.game),
         result.algorithmVersion,
@@ -228,34 +258,36 @@ export class FairnessDb {
         fingerprintOf(inputs),
         typeof inputs.commitment === "string" && inputs.commitment ? inputs.commitment.trim().toLowerCase() : null,
         storeTrace ? 1 : 0,
-      );
-    return Number(info.lastInsertRowid);
+      ],
+    };
   }
 
-  /** Re-audit: replaces the current statuses and keeps the previous audit in previous_audits_json (never silently lost). */
-  updateRoundResult(id: number, result: VerificationResult) {
-    this.revision++;
-    const cur = this.db.prepare("SELECT overall_status, outcome_status, commitment_status, audited_at, result_json, previous_audits_json FROM rounds WHERE id = ?").get(id) as
-      | Record<string, string>
-      | undefined;
-    if (!cur) return false;
-    const prev: PreviousAudit[] = cur.previous_audits_json ? JSON.parse(cur.previous_audits_json) : [];
-    prev.push({
-      auditedAt: cur.audited_at,
-      overall: cur.overall_status as OverallStatus,
-      outcome: cur.outcome_status as OutcomeStatus,
-      commitment: cur.commitment_status as CommitmentStatus,
-      appVersion: (JSON.parse(cur.result_json) as { appVersion?: string }).appVersion ?? "1.0.0",
-    });
-    const storedTrace = this.db.prepare("SELECT trace_stored FROM rounds WHERE id = ?").get(id) as { trace_stored: number };
+  async insertRound(result: VerificationResult, importBatchId: string | null = null, storeTrace = true): Promise<number> {
+    return (await this.sql.run(...toArgs(this.insertStatement(result, importBatchId, storeTrace)))).lastInsertRowid;
+  }
+
+  /**
+   * The UPDATE for a re-audit: replaces the current statuses and appends the previous audit to
+   * previous_audits_json (never silently lost). Built from the record as read, so many re-audits can be
+   * written in one atomic batch.
+   */
+  reauditStatement(current: StoredRound, result: VerificationResult): Statement {
+    const prev: PreviousAudit[] = [
+      ...current.previousAudits,
+      {
+        auditedAt: current.auditedAt,
+        overall: current.overallStatus,
+        outcome: current.outcomeStatus,
+        commitment: current.commitmentStatus,
+        appVersion: current.result.appVersion ?? "1.0.0",
+      },
+    ];
     const { inputs: _i, calculated, reported, trace, ...rest } = result;
     void _i;
-    this.db
-      .prepare(
-        `UPDATE rounds SET outcome_status=?, commitment_status=?, timing_status=?, overall_status=?, audited_at=?, recorded_json=?,
+    return {
+      sql: `UPDATE rounds SET outcome_status=?, commitment_status=?, timing_status=?, overall_status=?, audited_at=?, recorded_json=?,
          calculated_json=?, result_json=?, previous_audits_json=? WHERE id=?`,
-      )
-      .run(
+      args: [
         result.outcome.status,
         result.commitment.status,
         result.timing.status,
@@ -263,16 +295,23 @@ export class FairnessDb {
         result.computedAt,
         reported ? JSON.stringify(reported) : null,
         calculated ? JSON.stringify(calculated) : null,
-        JSON.stringify(storedTrace.trace_stored ? { ...rest, trace } : compactResult(result)),
+        JSON.stringify(current.compact ? compactResult(result) : { ...rest, trace }),
         JSON.stringify(prev),
-        id,
-      );
+        current.id,
+      ],
+    };
+  }
+
+  async updateRoundResult(id: number, result: VerificationResult): Promise<boolean> {
+    const current = await this.getRound(id);
+    if (!current) return false;
+    await this.sql.run(...toArgs(this.reauditStatement(current, result)));
     return true;
   }
 
-  private where(f: RoundFilter): { clause: string; params: SQLInputValue[] } {
+  private where(f: RoundFilter): { clause: string; params: Param[] } {
     const where: string[] = [];
-    const params: SQLInputValue[] = [];
+    const params: Param[] = [];
     const eq = (column: string, value: string | undefined) => {
       if (!value) return;
       where.push(`${column} = ?`);
@@ -298,7 +337,7 @@ export class FairnessDb {
   private toSummary(r: Record<string, unknown>): RoundSummary {
     const game = r.game as string;
     return {
-      id: r.id as number,
+      id: Number(r.id),
       roundId: r.round_id as string | null,
       game,
       algorithmVersion: r.algorithm_version as string | null,
@@ -318,24 +357,42 @@ export class FairnessDb {
     };
   }
 
-  countRounds(f: RoundFilter = {}): number {
+  async countRounds(f: RoundFilter = {}): Promise<number> {
     const { clause, params } = this.where(f);
-    return (this.db.prepare(`SELECT COUNT(*) AS n FROM rounds ${clause}`).get(...params) as { n: number }).n;
+    return Number((await this.sql.get<{ n: number }>(`SELECT COUNT(*) AS n FROM rounds ${clause}`, ...params))?.n ?? 0);
   }
 
   /** Lightweight paginated listing (no traces or full results). */
-  listSummaries(f: RoundFilter = {}): { total: number; rounds: RoundSummary[] } {
+  async listSummaries(f: RoundFilter = {}): Promise<{ total: number; rounds: RoundSummary[] }> {
     const { clause, params } = this.where(f);
-    const total = this.countRounds(f);
-    const rows = this.db.prepare(`SELECT ${SUMMARY_COLUMNS} FROM rounds ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...params, f.limit ?? 50, f.offset ?? 0);
-    return { total, rounds: (rows as Record<string, unknown>[]).map((r) => this.toSummary(r)) };
+    const total = await this.countRounds(f);
+    const rows = await this.sql.all(`SELECT ${SUMMARY_COLUMNS} FROM rounds ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`, ...params, f.limit ?? 50, f.offset ?? 0);
+    return { total, rounds: rows.map((r) => this.toSummary(r)) };
   }
 
-  /** Streams lightweight rows (used by the CSV export so memory stays flat for any size). */
-  *iterateSummaries(f: RoundFilter = {}): Generator<RoundSummary> {
+  /** Newest-first keyset pagination over a filter: memory stays flat for any size. */
+  private async *pages(columns: string, f: RoundFilter): AsyncGenerator<Record<string, unknown>> {
     const { clause, params } = this.where(f);
-    const stmt = this.db.prepare(`SELECT ${SUMMARY_COLUMNS} FROM rounds ${clause} ORDER BY id DESC`);
-    for (const r of stmt.iterate(...params)) yield this.toSummary(r as Record<string, unknown>);
+    let before = Number.MAX_SAFE_INTEGER;
+    let remaining = f.limit ?? Infinity;
+    while (remaining > 0) {
+      const size = Math.min(PAGE, remaining);
+      const rows = await this.sql.all(
+        `SELECT ${columns} FROM rounds ${clause ? `${clause} AND` : "WHERE"} id < ? ORDER BY id DESC LIMIT ?`,
+        ...params,
+        before,
+        size,
+      );
+      for (const r of rows) yield r;
+      if (rows.length < size) return;
+      before = Number(rows[rows.length - 1].id);
+      remaining -= rows.length;
+    }
+  }
+
+  /** Streams lightweight rows (used by the CSV export). */
+  async *iterateSummaries(f: RoundFilter = {}): AsyncGenerator<RoundSummary> {
+    for await (const r of this.pages(SUMMARY_COLUMNS, f)) yield this.toSummary(r);
   }
 
   private toStored(r: Record<string, unknown>): StoredRound {
@@ -378,29 +435,25 @@ export class FairnessDb {
     };
   }
 
-  /** Full records; used for detail views and bounded exports. Iterates lazily. */
-  *iterateRounds(f: RoundFilter = {}): Generator<StoredRound> {
-    const { clause, params } = this.where(f);
-    const stmt = this.db.prepare(`SELECT * FROM rounds ${clause} ORDER BY id DESC ${f.limit ? "LIMIT ?" : ""}`);
-    for (const r of stmt.iterate(...params, ...(f.limit ? [f.limit] : []))) yield this.toStored(r as Record<string, unknown>);
+  /** Full records; used for detail views, re-audits and bounded exports. Iterates lazily, page by page. */
+  async *iterateRounds(f: RoundFilter = {}): AsyncGenerator<StoredRound> {
+    for await (const r of this.pages("*", f)) yield this.toStored(r);
   }
 
-  getRound(id: number): StoredRound | null {
-    const r = this.stmt("SELECT * FROM rounds WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+  async getRound(id: number): Promise<StoredRound | null> {
+    const r = await this.sql.get("SELECT * FROM rounds WHERE id = ?", id);
     return r ? this.toStored(r) : null;
   }
 
-  deleteRound(id: number) {
-    this.revision++;
-    return Number(this.db.prepare("DELETE FROM rounds WHERE id = ?").run(id).changes);
+  async deleteRound(id: number): Promise<number> {
+    return (await this.sql.run("DELETE FROM rounds WHERE id = ?", id)).changes;
   }
 
   /* ------------------------------------------------------------------ aggregation (SQL, no JSON parsing) */
-  stats(f: RoundFilter = {}) {
+  async stats(f: RoundFilter = {}) {
     const { clause, params } = this.where(f);
-    const m = this.db
-      .prepare(
-        `SELECT COUNT(*) AS totalRounds,
+    const raw = await this.sql.get<Record<string, unknown>>(
+      `SELECT COUNT(*) AS totalRounds,
            COALESCE(SUM(outcome_status NOT IN ('invalid_input','unsupported_version')),0) AS reconstructed,
            COALESCE(SUM(outcome_status = 'match'),0) AS matching,
            COALESCE(SUM(outcome_status = 'mismatch'),0) AS mismatches,
@@ -412,42 +465,42 @@ export class FairnessDb {
            COALESCE(SUM(timing_status <> 'pre_round_publication_verified'),0) AS timingUnverified,
            COALESCE(SUM(outcome_status IN ('invalid_input','unsupported_version')),0) AS invalidRecords
          FROM rounds ${clause}`,
-      )
-      .get(...params) as Record<string, number>;
+      ...params,
+    );
+    const m = Object.fromEntries(Object.entries(raw ?? {}).map(([k, v]) => [k, Number(v)])) as Record<string, number>;
 
     const statuses: OutcomeStatus[] = ["match", "mismatch", "reconstructed", "missing_comparison", "invalid_input", "unsupported_version"];
-    const byGameRows = this.db.prepare(`SELECT game, outcome_status AS s, COUNT(*) AS n FROM rounds ${clause} GROUP BY game, outcome_status`).all(...params) as {
-      game: string;
-      s: OutcomeStatus;
-      n: number;
-    }[];
+    const byGameRows = await this.sql.all<{ game: string; s: OutcomeStatus; n: number }>(
+      `SELECT game, outcome_status AS s, COUNT(*) AS n FROM rounds ${clause} GROUP BY game, outcome_status`,
+      ...params,
+    );
     const byGame = ["crash", "blackjack", "keno", "mines"].map((game) => {
       const row = { game } as { game: string } & Record<OutcomeStatus, number>;
-      for (const s of statuses) row[s] = byGameRows.find((x) => x.game === game && x.s === s)?.n ?? 0;
+      for (const s of statuses) row[s] = Number(byGameRows.find((x) => x.game === game && x.s === s)?.n ?? 0);
       return row;
     });
-    const overTime = this.db
-      .prepare(
+    const overTime = (
+      await this.sql.all<{ date: string; match: number; mismatch: number; other: number }>(
         `SELECT COALESCE(date(round_timestamp), date(audited_at)) AS date,
            SUM(outcome_status = 'match') AS match, SUM(outcome_status = 'mismatch') AS mismatch,
            SUM(outcome_status NOT IN ('match','mismatch')) AS other
          FROM rounds ${clause} GROUP BY 1 ORDER BY 1`,
+        ...params,
       )
-      .all(...params) as { date: string; match: number; mismatch: number; other: number }[];
+    ).map((r) => ({ date: r.date, match: Number(r.match), mismatch: Number(r.mismatch), other: Number(r.other) }));
     const overall: Record<string, number> = {};
-    for (const r of this.db.prepare(`SELECT overall_status AS s, COUNT(*) AS n FROM rounds ${clause} GROUP BY 1`).all(...params) as { s: string; n: number }[]) {
-      overall[r.s] = r.n;
+    for (const r of await this.sql.all<{ s: string; n: number }>(`SELECT overall_status AS s, COUNT(*) AS n FROM rounds ${clause} GROUP BY 1`, ...params)) {
+      overall[r.s] = Number(r.n);
     }
     return { metrics: m, byGame, overTime, overall };
   }
 
-  seedSessions(f: { game?: string; limit?: number; offset?: number } = {}): { total: number; sessions: SeedSession[] } {
+  async seedSessions(f: { game?: string; limit?: number; offset?: number } = {}): Promise<{ total: number; sessions: SeedSession[] }> {
     const where = "WHERE server_seed IS NOT NULL AND server_seed <> ''" + (f.game ? " AND game = ?" : "");
-    const params: SQLInputValue[] = f.game ? [f.game] : [];
-    const total = (this.db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM rounds ${where} GROUP BY game, server_seed, client_seed)`).get(...params) as { n: number }).n;
-    const rows = this.db
-      .prepare(
-        `SELECT game, server_seed, client_seed, COUNT(*) AS rounds,
+    const params: Param[] = f.game ? [f.game] : [];
+    const total = Number((await this.sql.get<{ n: number }>(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM rounds ${where} GROUP BY game, server_seed, client_seed)`, ...params))?.n ?? 0);
+    const rows = await this.sql.all<Record<string, string | number | null>>(
+      `SELECT game, server_seed, client_seed, COUNT(*) AS rounds,
            json_group_array(DISTINCT algorithm_version) AS versions,
            MIN(${NUMERIC_NONCE_KEY}) AS nmin, MAX(${NUMERIC_NONCE_KEY}) AS nmax,
            MIN(round_timestamp) AS first_seen, MAX(round_timestamp) AS last_seen,
@@ -458,8 +511,10 @@ export class FairnessDb {
          FROM rounds ${where}
          GROUP BY game, server_seed, client_seed
          ORDER BY MAX(id) DESC LIMIT ? OFFSET ?`,
-      )
-      .all(...params, f.limit ?? 50, f.offset ?? 0) as Record<string, string | number | null>[];
+      ...params,
+      f.limit ?? 50,
+      f.offset ?? 0,
+    );
     // JSON arrays, not comma-joined text: an evidence source such as "export, page 2" must stay one value
     const split = (v: unknown) => (typeof v === "string" ? (JSON.parse(v) as (string | null)[]).filter((x): x is string => typeof x === "string" && x !== "") : []);
     return {
@@ -491,32 +546,70 @@ export class FairnessDb {
   }
 
   /* ------------------------------------------------------------------ imports */
-  createImport(job: ImportJob) {
-    this.db
-      .prepare("INSERT INTO imports (id, created_at, format, filename, total, stored, rejected, errors_json, status, processed, duplicates) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
-      .run(job.id, job.createdAt, job.format, job.filename, job.total, 0, 0, "[]", job.status, 0, 0);
+  async createImport(job: ImportJob) {
+    await this.sql.run(
+      "INSERT INTO imports (id, created_at, format, filename, total, stored, rejected, errors_json, status, processed, duplicates, chunks_done, updated_at, skip_duplicates) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      job.id,
+      job.createdAt,
+      job.format,
+      job.filename,
+      job.total,
+      0,
+      0,
+      "[]",
+      job.status,
+      0,
+      0,
+      0,
+      job.createdAt,
+      job.skipDuplicates ? 1 : 0,
+    );
   }
 
-  updateImport(job: ImportJob) {
-    this.db
-      .prepare("UPDATE imports SET total=?, stored=?, rejected=?, errors_json=?, status=?, processed=?, duplicates=?, finished_at=?, outcome_counts_json=?, failure=? WHERE id=?")
-      .run(job.total, job.stored, job.rejected, JSON.stringify(job.errors), job.status, job.processed, job.duplicates, job.finishedAt, JSON.stringify(job.outcomeCounts), job.failure, job.id);
+  /** The UPDATE that records a job's progress; batched with a chunk's inserts so both commit together. */
+  importUpdateStatement(job: ImportJob): Statement {
+    return {
+      sql: "UPDATE imports SET total=?, stored=?, rejected=?, errors_json=?, status=?, processed=?, duplicates=?, finished_at=?, outcome_counts_json=?, failure=?, chunks_done=?, updated_at=? WHERE id=?",
+      args: [
+        job.total,
+        job.stored,
+        job.rejected,
+        JSON.stringify(job.errors),
+        job.status,
+        job.processed,
+        job.duplicates,
+        job.finishedAt,
+        JSON.stringify(job.outcomeCounts),
+        job.failure,
+        job.chunksDone,
+        new Date().toISOString(),
+        job.id,
+      ],
+    };
   }
 
-  listImports(limit = 50): ImportJob[] {
-    return (this.db.prepare("SELECT * FROM imports ORDER BY created_at DESC LIMIT ?").all(limit) as Record<string, unknown>[]).map((r) => this.toImport(r));
+  async updateImport(job: ImportJob) {
+    await this.sql.run(...toArgs(this.importUpdateStatement(job)));
   }
 
-  getImport(id: string): ImportJob | null {
-    const r = this.db.prepare("SELECT * FROM imports WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+  async listImports(limit = 50): Promise<ImportJob[]> {
+    return (await this.sql.all("SELECT * FROM imports ORDER BY created_at DESC LIMIT ?", limit)).map((r) => this.toImport(r));
+  }
+
+  async getImport(id: string): Promise<ImportJob | null> {
+    const r = await this.sql.get("SELECT * FROM imports WHERE id = ?", id);
     return r ? this.toImport(r) : null;
   }
 
   private toImport(r: Record<string, unknown>): ImportJob {
     const errors = JSON.parse((r.errors_json as string) || "[]");
+    let status = (r.status as ImportJobStatus) ?? "completed";
+    const updatedAt = (r.updated_at as string | null) ?? (r.created_at as string);
+    // the uploader (a browser tab) went away: nothing will arrive, so say so instead of "running" forever
+    if ((status === "running" || status === "paused") && Date.now() - Date.parse(updatedAt) > IMPORT_STALE_MS) status = "interrupted";
     return {
       id: r.id as string,
-      status: (r.status as ImportJobStatus) ?? "completed",
+      status,
       format: r.format as string,
       filename: (r.filename as string | null) ?? null,
       total: Number(r.total),
@@ -530,6 +623,11 @@ export class FairnessDb {
       createdAt: r.created_at as string,
       finishedAt: (r.finished_at as string | null) ?? null,
       failure: (r.failure as string | null) ?? null,
+      chunksDone: Number(r.chunks_done ?? 0),
+      skipDuplicates: Number(r.skip_duplicates ?? 1) === 1,
+      updatedAt,
     };
   }
 }
+
+const toArgs = (s: Statement): [string, ...Param[]] => [s.sql, ...(s.args ?? [])];

@@ -34,7 +34,10 @@ export {
 } from "@shared/contracts";
 
 export const SERVER_DOWN_MESSAGE =
-  "Cannot reach the Fairness Lab server. Start it with start.bat (keep that window open) and reload this page.";
+  "Cannot reach the Fairness Lab server. Running locally? Start it with start.bat (keep that window open) and reload this page.";
+
+/** Fired whenever the server answers 401: the app then shows the sign-in screen. */
+export const AUTH_REQUIRED_EVENT = "sfl:auth-required";
 
 export class ApiError extends Error {
   constructor(
@@ -64,6 +67,7 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   } catch {
     throw new ApiError(res.status, `Unexpected response from ${url} (HTTP ${res.status}). Is the page served by the Fairness Lab server?`);
   }
+  if (res.status === 401 && !url.startsWith("/api/auth/")) window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
   if (!res.ok) throw new ApiError(res.status, (body as { error?: string } | null)?.error ?? `HTTP ${res.status}`);
   return body as T;
 }
@@ -105,17 +109,20 @@ export const api = {
   reverifyMany: (f: RoundFilter) => req<{ rounds: number; reproduced: number; statusChanged: number }>("/api/rounds/reverify", post(f)),
   scriptUrl: (id: number) => `/api/rounds/${id}/script`,
 
-  startImport: (text: string, format: string, filename?: string, skipDuplicates = true) =>
-    req<{ job: ImportJob }>("/api/import", post({ text, format, filename, skipDuplicates })),
+  createImport: (o: { format: string; total: number; filename?: string; skipDuplicates: boolean }) => req<{ job: ImportJob }>("/api/import", post(o)),
+  sendChunk: (id: string, seq: number, text: string, lineOffset: number) => req<ImportJob>(`/api/import/jobs/${id}/chunks`, post({ seq, text, lineOffset })),
   importJob: (id: string) => req<ImportJob>(`/api/import/jobs/${id}`),
-  controlImport: (id: string, action: "pause" | "resume" | "cancel") => req<ImportJob>(`/api/import/jobs/${id}/${action}`, post()),
+  controlImport: (id: string, action: "pause" | "resume" | "cancel" | "finish") => req<ImportJob>(`/api/import/jobs/${id}/${action}`, post()),
   imports: () => req<ImportJob[]>("/api/imports"),
 
   stats: (f: RoundFilter = {}) => req<Stats>(`/api/stats?${qs({ ...f })}`),
   integrity: () => req<IntegrityReport>("/api/integrity"),
   sessions: (game?: string, offset = 0) => req<{ total: number; sessions: SeedSession[] }>(`/api/sessions?${qs({ game, offset, limit: 50 })}`),
 
-  meta: () => req<{ version: string; schemaVersion: number; migration: { from: number; to: number; backup: string | null } | null }>("/api/meta"),
+  meta: () => req<{ version: string; schemaVersion: number; hosted: boolean; migration: { from: number; to: number; backup: string | null } | null }>("/api/meta"),
+  authStatus: () => req<{ required: boolean; configured: boolean; authenticated: boolean }>("/api/auth/status"),
+  login: (password: string) => req<{ authenticated: boolean }>("/api/auth/login", post({ password })),
+  logout: () => req<{ authenticated: boolean }>("/api/auth/logout", post()),
   settings: () => req<Settings>("/api/settings"),
   saveSettings: (s: Partial<Settings>) => req<Settings>("/api/settings", { method: "PUT", body: JSON.stringify(s) }),
   backup: () => req<{ file: string; bytes: number }>("/api/backup", post()),

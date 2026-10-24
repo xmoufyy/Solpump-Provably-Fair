@@ -129,7 +129,7 @@ For independent reproduction, **Round History → Standalone script** downloads 
 
 You can import CSV, JSON (an array, `{ "rounds": [...] }`, or a single object), JSONL, or pasted text, up to 50 MB per import. Keys can be snake_case or camelCase.
 
-Imports run **in the background**: you can keep working, watch progress, pause, resume or cancel. Each row is verified on its own; malformed rows are listed with line numbers without discarding the rest. Rows are committed in small transactions, so a cancelled or failed import keeps only complete records.
+The browser uploads a file **in pieces**. Each piece is verified and committed before the next is sent, so you can watch progress, pause, resume or cancel, and a cancelled or failed import keeps only complete records. Keep the page open until the import finishes; an import that stops receiving pieces is shown as interrupted after 10 minutes. Each row is verified on its own; malformed rows are listed with their line number in the original file, without discarding the rest. A piece that is sent twice (for example after a dropped connection) is stored only once.
 
 Rounds that are **already stored are skipped**, so re-importing a file is safe. Give large nonces and round IDs as text, not JSON numbers: a JSON number beyond 2^53 has already lost digits and is rejected.
 
@@ -149,13 +149,37 @@ round_id,game,algorithm_version,server_seed,client_seed,nonce,difficulty,selecte
 
 ## Security model
 
-This is a single-user tool with no login.
+This is a single-user tool. Locally it has no login unless you set `SFL_PASSWORD`; a hosted deployment always requires one.
 
 * **Network exposure.** It listens on `localhost` only. It answers only requests whose `Host` is localhost, 127.0.0.1 or [::1], which protects against DNS rebinding.
 * **Cross-site requests.** Any request that changes data must come from the app's own origin.
 * **Untrusted data.** Imported files and RPC responses are size-limited and validated.
 * **Exports.** CSV exports neutralise spreadsheet formulas; HTML reports can't run scripts.
-* **Exposing it deliberately.** Setting `HOST`/`SFL_ALLOWED_HOSTS` exposes every stored seed to the network, so only do it on a trusted network. The app prints a warning.
+* **Exposing it deliberately.** Setting `HOST`/`SFL_ALLOWED_HOSTS` without `SFL_PASSWORD` exposes every stored seed to the network, so only do it on a trusted network. The app prints a warning.
+* **Login (hosted, or local with `SFL_PASSWORD`).** One password, compared in constant time; failed attempts are slowed and throttled. The session is a signed, expiring (12 h) token in an `HttpOnly`, `SameSite=Strict`, `Secure` cookie, with nothing stored on the server. A hosted deployment without `SFL_PASSWORD` refuses every data request rather than running open.
+
+## Deploying to Vercel
+
+The same code runs on Vercel, with the records in a hosted [Turso](https://turso.tech) (libSQL) database instead of the local file. The static app is served by Vercel and the API runs as one serverless function (`api/index.mjs`, bundled by `npm run build:api`). Local use with `start.bat` is unchanged.
+
+1. Create a Turso database (Vercel Marketplace → Turso, or the Turso dashboard) and copy its URL (`libsql://…`) and an auth token.
+2. Import this GitHub repository as a Vercel project. The build settings come from `vercel.json`.
+3. In the project's environment variables, set:
+
+   | Variable | Value |
+   |---|---|
+   | `TURSO_DATABASE_URL` | the `libsql://…` URL |
+   | `TURSO_AUTH_TOKEN` | the database auth token |
+   | `SFL_PASSWORD` | a long, random password (the only login) |
+   | `SFL_SESSION_SECRET` | optional: a random string of 32+ characters; changing it signs everyone out |
+   | `SFL_ALLOWED_HOSTS` | optional: custom domains, comma-separated (the `*.vercel.app` domains are allowed automatically) |
+
+4. Deploy. The schema is created on the first request.
+
+What differs when hosted:
+* **Data location.** Records, including revealed seeds, are stored by Turso and the API runs on Vercel. Revealed seeds are not secret, but the data leaves your machine.
+* **Backups.** The "Create database backup" button is replaced by Turso's own backups and point-in-time restore. The JSON export remains a portable copy.
+* **Imports.** Files are uploaded in pieces of about 400 KB, which keeps every request under Vercel's request size limit.
 
 ## Project layout
 

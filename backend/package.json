@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@fastify/static": "^10.1.6",
+    "@libsql/client": "^0.18.0",
     "fastify": "^5.2.1",
     "pdfkit": "^0.16.0",
     "seedrandom": "3.0.5",

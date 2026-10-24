@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { Sql, Statement } from "./sql.js";
 
 /**
  * Schema history
@@ -7,8 +7,11 @@ import type { DatabaseSync } from "node:sqlite";
  *       databases follow exactly the same migration path.
  *  v1 - Fairness Lab 2.0: fingerprints, re-audit history, import job state, commitment column,
  *       query indexes, 'commitment_mismatch' final assessment.
+ *  v2 - chunked imports (serverless-safe): chunk sequence, last activity, duplicate policy per job.
  *
- * Rollback: every migration has a tested `down`. A file backup is also written (VACUUM INTO)
+ * Each migration returns its statements; they run in ONE atomic batch together with the
+ * user_version bump, so a migration either fully applies or leaves the database untouched.
+ * Rollback: every migration has a tested `down`. A local file backup is also written (VACUUM INTO)
  * before migrating any database that contains data.
  */
 export const V0_SCHEMA = `
@@ -51,8 +54,8 @@ export const V0_SCHEMA = `
 export interface Migration {
   version: number;
   description: string;
-  up(db: DatabaseSync): void;
-  down(db: DatabaseSync): void;
+  up(db: Sql): Promise<Statement[]>;
+  down(db: Sql): Promise<Statement[]>;
 }
 
 /** Same canonicalisation as FairnessDb.fingerprintOf (duplicated to keep migrations frozen in time). */
@@ -77,8 +80,8 @@ export const MIGRATIONS: Migration[] = [
   {
     version: 1,
     description: "v2.0: fingerprints, re-audit history, import jobs, commitment column, indexes, commitment_mismatch",
-    up(db) {
-      db.exec(`
+    async up(db) {
+      const statements = sqlStatements(`
         ALTER TABLE rounds ADD COLUMN fingerprint TEXT;
         ALTER TABLE rounds ADD COLUMN previous_audits_json TEXT;
         ALTER TABLE rounds ADD COLUMN trace_stored INTEGER NOT NULL DEFAULT 1;
@@ -92,14 +95,14 @@ export const MIGRATIONS: Migration[] = [
         UPDATE imports SET processed = total, finished_at = created_at;
       `);
       // backfill fingerprint + commitment from the stored inputs
-      const upd = db.prepare("UPDATE rounds SET fingerprint = ?, commitment = ? WHERE id = ?");
-      for (const row of db.prepare("SELECT id, inputs_json FROM rounds").iterate() as Iterable<{ id: number; inputs_json: string }>) {
+      for (const row of await db.all<{ id: number; inputs_json: string }>("SELECT id, inputs_json FROM rounds")) {
         const inputs = JSON.parse(row.inputs_json) as Record<string, unknown>;
         const c = typeof inputs.commitment === "string" && inputs.commitment ? inputs.commitment.trim().toLowerCase() : null;
-        upd.run(fingerprint(inputs), c, row.id);
+        statements.push({ sql: "UPDATE rounds SET fingerprint = ?, commitment = ? WHERE id = ?", args: [fingerprint(inputs), c, row.id] });
       }
       // v1 reported a commitment mismatch on a matching outcome as plain "mismatch"
-      db.exec(`
+      statements.push(
+        ...sqlStatements(`
         UPDATE rounds SET overall_status = 'commitment_mismatch',
           result_json = json_set(result_json, '$.overall', 'commitment_mismatch')
         WHERE overall_status = 'mismatch' AND outcome_status <> 'mismatch' AND commitment_status = 'mismatch';
@@ -112,10 +115,12 @@ export const MIGRATIONS: Migration[] = [
         CREATE INDEX idx_imports_created ON imports(created_at);
         -- redundant: idx_rounds_seed_ctx starts with game (one fewer index to maintain per insert)
         DROP INDEX IF EXISTS idx_rounds_game;
-      `);
+      `),
+      );
+      return statements;
     },
-    down(db) {
-      db.exec(`
+    async down() {
+      return sqlStatements(`
         DROP INDEX IF EXISTS idx_rounds_overall;
         DROP INDEX IF EXISTS idx_rounds_outcome;
         DROP INDEX IF EXISTS idx_rounds_batch;
@@ -139,6 +144,37 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 2,
+    description: "chunked imports: chunk sequence for idempotent uploads, last activity, duplicate policy",
+    async up() {
+      return sqlStatements(`
+        ALTER TABLE imports ADD COLUMN chunks_done INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE imports ADD COLUMN updated_at TEXT;
+        ALTER TABLE imports ADD COLUMN skip_duplicates INTEGER NOT NULL DEFAULT 1;
+        UPDATE imports SET updated_at = COALESCE(finished_at, created_at);
+      `);
+    },
+    async down() {
+      return sqlStatements(`
+        ALTER TABLE imports DROP COLUMN chunks_done;
+        ALTER TABLE imports DROP COLUMN updated_at;
+        ALTER TABLE imports DROP COLUMN skip_duplicates;
+      `);
+    },
+  },
 ];
+
+/** Splits a migration script into single statements (the scripts contain no semicolons inside literals). */
+export function sqlStatements(script: string): Statement[] {
+  return script
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("--"))
+    .join("\n")
+    .split(";")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((sql) => ({ sql }));
+}
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

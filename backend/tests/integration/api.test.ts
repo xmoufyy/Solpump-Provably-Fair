@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { removeTempDir } from "./cleanup.js";
 import { buildApp } from "../../src/api/app.js";
 import { FairnessDb } from "../../src/database/db.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,12 +11,12 @@ const dbPath = join(dir, "test.db");
 let ctx: Awaited<ReturnType<typeof buildApp>>;
 
 beforeAll(async () => {
-  ctx = await buildApp({ db: new FairnessDb(dbPath) });
+  ctx = await buildApp({ db: await FairnessDb.open(dbPath) });
 });
 afterAll(async () => {
   await ctx.app.close();
-  ctx.db.db.close();
-  rmSync(dir, { recursive: true, force: true });
+  ctx.db.close();
+  removeTempDir(dir);
 });
 
 const S = "SERVER_TEST_2026", C = "CLIENT_TEST_2026";
@@ -76,10 +77,10 @@ describe("API integration", () => {
 
   it("history persists across app restarts (same db file)", async () => {
     const before = (await ctx.app.inject({ url: "/api/rounds" })).json().total;
-    const again = await buildApp({ db: new FairnessDb(dbPath) });
+    const again = await buildApp({ db: await FairnessDb.open(dbPath) });
     const after = (await again.app.inject({ url: "/api/rounds" })).json().total;
     await again.app.close();
-    again.db.db.close();
+    again.db.close();
     expect(after).toBe(before);
     expect(after).toBeGreaterThan(0);
   });

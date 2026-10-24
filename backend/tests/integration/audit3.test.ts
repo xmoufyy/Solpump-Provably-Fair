@@ -3,7 +3,8 @@
  * Each test failed against the code before the fix. Data is synthetic and lives in a temp directory.
  */
 import { afterAll, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { removeTempDir } from "./cleanup.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -17,12 +18,12 @@ const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 afterAll(async () => {
   for (const a of apps) {
     await a.app.close();
-    a.db.db.close();
+    a.db.close();
   }
-  rmSync(tmp, { recursive: true, force: true });
+  removeTempDir(tmp);
 });
 async function fresh() {
-  const ctx = await buildApp({ db: new FairnessDb(":memory:") });
+  const ctx = await buildApp({ db: await FairnessDb.open(":memory:") });
   apps.push(ctx);
   const call = async <T = unknown>(method: "GET" | "POST" | "PUT", url: string, payload?: unknown): Promise<T> => {
     const res = await ctx.app.inject({ method, url, payload: payload as object | undefined });
@@ -115,18 +116,17 @@ describe("G-07 Integrity: classification of conflicting Crash records and large-
 });
 
 describe("G-08 Import: a failed chunk left its rolled-back rows counted", () => {
-  it("after a mid-chunk failure the counters equal the committed rows", async () => {
+  it("after a failed chunk the counters equal the committed rows (none)", async () => {
     const t = await fresh();
-    const real = t.db.insertRound.bind(t.db);
-    let calls = 0;
-    t.db.insertRound = (...args: Parameters<typeof real>) => {
-      if (++calls === 3) throw new Error("disk full (simulated)");
-      return real(...args);
+    const real = t.db.sql.batch.bind(t.db.sql);
+    t.db.sql.batch = async () => {
+      throw new Error("disk full (simulated)");
     };
     const job = await t.importJson(Array.from({ length: 5 }, (_, i) => ({ game: "crash", roundId: `r${i}`, serverSeed: S, clientSeed: C })));
-    t.db.insertRound = real;
+    t.db.sql.batch = real;
     expect(job.status).toBe("failed");
-    const stored = t.db.countRounds();
+    const stored = await t.db.countRounds();
+    expect(stored).toBe(0);
     expect(job.stored).toBe(stored);
     expect(job.processed).toBe(stored);
   });

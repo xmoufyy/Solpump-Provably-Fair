@@ -1,0 +1,8 @@
+# Never upload local data, scratch files or build output from this machine (`vercel deploy` from the CLI).
+data/
+.tmp/
+.vercel/
+node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/

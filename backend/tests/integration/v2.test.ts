@@ -1,27 +1,28 @@
 /**
- * Integration tests for v2 behaviour: migrations, import jobs, SQL analytics, integrity checks,
+ * Integration tests for v2 behaviour: migrations, chunked import jobs, SQL analytics, integrity checks,
  * trace regeneration, re-audits, standalone scripts, export limits.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { removeTempDir } from "./cleanup.js";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { performance } from "node:perf_hooks";
 import { buildApp } from "../../src/api/app.js";
 import { FairnessDb } from "../../src/database/db.js";
 import { SCHEMA_VERSION } from "../../src/database/migrations.js";
 import type { ImportJob } from "../../../shared/src/contracts.js";
+import { planImport } from "../../../shared/src/imports.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "../../..");
 const V1_FIXTURE = join(repoRoot, "fixtures/db/v1-schema0.db");
 const tmp = mkdtempSync(join(tmpdir(), "sfl-v2-"));
-afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+afterAll(() => removeTempDir(tmp));
 
 async function fresh(name: string) {
-  return buildApp({ db: new FairnessDb(join(tmp, `${name}.db`)) });
+  return buildApp({ db: await FairnessDb.open(join(tmp, `${name}.db`)) });
 }
 
 describe("migration of an authentic v1 database", () => {
@@ -30,17 +31,17 @@ describe("migration of an authentic v1 database", () => {
   beforeAll(async () => {
     mkdirSync(dirname(path), { recursive: true });
     copyFileSync(V1_FIXTURE, path);
-    ctx = await buildApp({ db: new FairnessDb(path) });
+    ctx = await buildApp({ db: await FairnessDb.open(path) });
   });
   afterAll(async () => {
     await ctx.app.close();
-    ctx.db.db.close();
+    ctx.db.close();
   });
 
-  it("upgrades schema v0 -> v1 and writes a backup first", () => {
+  it("upgrades schema v0 -> current and writes a backup first", async () => {
     expect(ctx.db.migration).toMatchObject({ from: 0, to: SCHEMA_VERSION });
     expect(ctx.db.migration?.backup && existsSync(ctx.db.migration.backup)).toBe(true);
-    expect(ctx.db.schemaVersion).toBe(SCHEMA_VERSION);
+    expect(await ctx.db.schemaVersion()).toBe(SCHEMA_VERSION);
   });
 
   it("keeps every record and the import history", async () => {
@@ -69,37 +70,37 @@ describe("migration of an authentic v1 database", () => {
     expect(job.stored).toBe(0);
   });
 
-  it("down-migration restores the v0 schema and data, and up again is lossless", () => {
+  it("down-migration restores the v0 schema and data, and up again is lossless", async () => {
     const copy = join(tmp, "roundtrip.db");
     copyFileSync(V1_FIXTURE, copy);
-    const db = new FairnessDb(copy);
-    const before = db.db.prepare("SELECT id, overall_status, outcome_status FROM rounds ORDER BY id").all();
-    db.migrateDown(0);
-    expect(db.schemaVersion).toBe(0);
-    const cols = (db.db.prepare("PRAGMA table_info(rounds)").all() as { name: string }[]).map((c) => c.name);
+    const db = await FairnessDb.open(copy);
+    const before = await db.sql.all("SELECT id, overall_status, outcome_status FROM rounds ORDER BY id");
+    await db.migrateDown(0);
+    expect(await db.schemaVersion()).toBe(0);
+    const cols = (await db.sql.all<{ name: string }>("PRAGMA table_info(rounds)")).map((c) => c.name);
     expect(cols).not.toContain("fingerprint");
-    expect((db.db.prepare("SELECT COUNT(*) n FROM rounds WHERE overall_status = 'commitment_mismatch'").get() as { n: number }).n).toBe(0);
-    db.db.close();
-    const again = new FairnessDb(copy);
-    expect(again.schemaVersion).toBe(SCHEMA_VERSION);
-    expect(again.db.prepare("SELECT id, overall_status, outcome_status FROM rounds ORDER BY id").all()).toEqual(before);
-    again.db.close();
+    expect((await db.sql.get<{ n: number }>("SELECT COUNT(*) n FROM rounds WHERE overall_status = 'commitment_mismatch'"))?.n).toBe(0);
+    db.close();
+    const again = await FairnessDb.open(copy);
+    expect(await again.schemaVersion()).toBe(SCHEMA_VERSION);
+    expect(await again.sql.all("SELECT id, overall_status, outcome_status FROM rounds ORDER BY id")).toEqual(before);
+    again.close();
   });
 
-  it("refuses to open a database from a newer schema", () => {
+  it("refuses to open a database from a newer schema", async () => {
     const p = join(tmp, "future.db");
-    const db = new FairnessDb(p);
-    db.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
-    db.db.close();
-    expect(() => new FairnessDb(p)).toThrow(/newer than this application/);
+    const db = await FairnessDb.open(p);
+    await db.sql.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+    db.close();
+    await expect(FairnessDb.open(p)).rejects.toThrow(/newer than this application/);
   });
 
-  it("an empty database migrates without creating a backup", () => {
+  it("an empty database migrates without creating a backup", async () => {
     const p = join(tmp, "empty", "x.db");
-    const db = new FairnessDb(p);
+    const db = await FairnessDb.open(p);
     expect(db.migration).toMatchObject({ from: 0, backup: null });
     expect(existsSync(join(dirname(p), "backups"))).toBe(false);
-    db.db.close();
+    db.close();
   });
 });
 
@@ -114,59 +115,71 @@ describe("import jobs", () => {
   beforeAll(async () => (ctx = await fresh("jobs")));
   afterAll(async () => {
     await ctx.app.close();
-    ctx.db.db.close();
+    ctx.db.close();
   });
-  const poll = async (id: string, until: (j: ImportJob) => boolean) => {
-    for (let i = 0; i < 2000; i++) {
-      const j = (await ctx.app.inject({ url: `/api/import/jobs/${id}` })).json() as ImportJob;
-      if (until(j)) return j;
-      await new Promise((r) => setTimeout(r, 5));
+  const post = (url: string, payload?: unknown) => ctx.app.inject({ method: "POST", url, payload: payload as object | undefined });
+  const upload = async (text: string, maxChars: number, extra: Record<string, unknown> = {}) => {
+    const plan = planImport(text, "auto", maxChars);
+    const { job } = (await post("/api/import", { format: plan.format, total: plan.total, ...extra })).json() as { job: ImportJob };
+    for (const [seq, c] of plan.chunks.entries()) {
+      const res = await post(`/api/import/jobs/${job.id}/chunks`, { seq, text: c.text, lineOffset: c.lineOffset });
+      expect(res.statusCode, res.body).toBe(200);
     }
-    throw new Error("timeout");
+    return { plan, job: (await post(`/api/import/jobs/${job.id}/finish`)).json() as ImportJob };
   };
 
-  it("runs in the background and reports progress", async () => {
-    const { job } = (await ctx.app.inject({ method: "POST", url: "/api/import", payload: { text: syntheticCsv(3000), format: "csv" } })).json();
-    expect(job.status).toBe("running");
-    expect(job.total).toBe(3000);
-    const done = await poll(job.id, (j) => j.status === "completed");
-    expect(done.processed).toBe(3000);
-    expect(done.stored).toBe(3000);
-    expect(done.outcomeCounts.match! + done.outcomeCounts.mismatch!).toBe(3000);
+  it("imports a file uploaded in chunks and reports progress", async () => {
+    const { plan, job } = await upload(syntheticCsv(3000), 20_000);
+    expect(plan.chunks.length).toBeGreaterThan(5);
+    expect(job).toMatchObject({ status: "completed", total: 3000, processed: 3000, stored: 3000, chunksDone: plan.chunks.length });
+    expect(job.outcomeCounts.match! + job.outcomeCounts.mismatch!).toBe(3000);
+    expect(await ctx.db.countRounds({ batch: job.id })).toBe(3000);
+  });
+
+  it("a retried or concurrently repeated chunk is applied once; out-of-order chunks are refused", async () => {
+    const plan = planImport(syntheticCsv(300).replace(/r(\d+),/g, "x$1,").replace(/seed-/g, "xseed-"), "csv", 4000);
+    const { job } = (await post("/api/import", { format: "csv", total: plan.total })).json() as { job: ImportJob };
+    const send = (seq: number) => post(`/api/import/jobs/${job.id}/chunks`, { seq, ...plan.chunks[seq] });
+    await send(0);
+    await send(0); // retry after a lost response
+    expect((await send(2)).statusCode).toBe(409); // chunk 1 has not arrived yet
+    await Promise.all([send(1), send(1), send(1)]); // the same chunk racing itself
+    for (let seq = 2; seq < plan.chunks.length; seq++) await send(seq);
+    const done = (await post(`/api/import/jobs/${job.id}/finish`)).json() as ImportJob;
+    expect(done).toMatchObject({ processed: 300, stored: 300 });
+    expect(await ctx.db.countRounds({ batch: job.id })).toBe(300);
   });
 
   it("can be paused, resumed and cancelled; committed rows are complete and tagged", async () => {
-    const { job } = (await ctx.app.inject({ method: "POST", url: "/api/import", payload: { text: syntheticCsv(20000).replace(/r(\d+),/g, "p$1,").replace(/seed-/g, "pseed-"), format: "csv" } })).json();
-    await ctx.app.inject({ method: "POST", url: `/api/import/jobs/${job.id}/pause` });
-    const paused = await poll(job.id, (j) => j.status === "paused");
-    const processedWhilePaused = paused.processed;
-    await new Promise((r) => setTimeout(r, 50));
-    expect((await ctx.app.inject({ url: `/api/import/jobs/${job.id}` })).json().processed).toBe(processedWhilePaused);
-    await ctx.app.inject({ method: "POST", url: `/api/import/jobs/${job.id}/resume` });
-    await poll(job.id, (j) => j.processed > processedWhilePaused);
-    await ctx.app.inject({ method: "POST", url: `/api/import/jobs/${job.id}/cancel` });
-    const cancelled = await poll(job.id, (j) => j.status === "cancelled");
-    expect(cancelled.processed).toBeLessThan(20000);
+    const plan = planImport(syntheticCsv(400).replace(/r(\d+),/g, "p$1,").replace(/seed-/g, "pseed-"), "csv", 4000);
+    const { job } = (await post("/api/import", { format: "csv", total: plan.total })).json() as { job: ImportJob };
+    const send = (seq: number) => post(`/api/import/jobs/${job.id}/chunks`, { seq, ...plan.chunks[seq] });
+    await send(0);
+    expect((await post(`/api/import/jobs/${job.id}/pause`)).json().status).toBe("paused");
+    expect((await post(`/api/import/jobs/${job.id}/resume`)).json().status).toBe("running");
+    await send(1);
+    const cancelled = (await post(`/api/import/jobs/${job.id}/cancel`)).json() as ImportJob;
+    expect(cancelled.status).toBe("cancelled");
+    expect((await send(2)).statusCode).toBe(409);
+    expect(cancelled.processed).toBeLessThan(400);
     // every committed row is a full verification, and counts agree with the database
-    expect(ctx.db.countRounds({ batch: job.id })).toBe(cancelled.stored);
-    expect(ctx.db.countRounds({ batch: job.id, outcome: "match" }) + ctx.db.countRounds({ batch: job.id, outcome: "mismatch" })).toBe(cancelled.stored);
-    expect(ctx.db.getImport(job.id)?.status).toBe("cancelled");
+    expect(await ctx.db.countRounds({ batch: job.id })).toBe(cancelled.stored);
+    expect((await ctx.db.countRounds({ batch: job.id, outcome: "match" })) + (await ctx.db.countRounds({ batch: job.id, outcome: "mismatch" }))).toBe(cancelled.stored);
+    expect((await ctx.db.getImport(job.id))?.status).toBe("cancelled");
   });
 
-  it("keeps the API responsive while a 20,000-row import runs", async () => {
-    const { job } = (await ctx.app.inject({ method: "POST", url: "/api/import", payload: { text: syntheticCsv(20000).replace(/r(\d+),/g, "q$1,").replace(/seed-/g, "qseed-"), format: "csv" } })).json();
-    // Requests arrive from the network (timers here); in-process inject() alone would starve the
-    // job's setImmediate yields, which real HTTP traffic never does.
-    let worst = 0;
-    const deadline = Date.now() + 60000;
-    while ((await ctx.app.inject({ url: `/api/import/jobs/${job.id}` })).json().status === "running" && Date.now() < deadline) {
-      const scheduled = performance.now();
-      await new Promise((r) => setTimeout(r, 5));
-      await ctx.app.inject({ url: "/api/health" });
-      worst = Math.max(worst, performance.now() - scheduled - 5);
-    }
-    expect((await ctx.app.inject({ url: `/api/import/jobs/${job.id}` })).json().status).toBe("completed");
-    expect(worst).toBeLessThan(250);
+  it("row errors in later chunks cite the line in the original file", async () => {
+    const lines = syntheticCsv(200).replace(/r(\d+),/g, "e$1,").replace(/seed-/g, "eseed-").split("\n");
+    lines[150] = "e149,crash,eseed-149,client"; // physical line 151: one column short
+    const { job } = await upload(lines.join("\n"), 2000);
+    expect(job.errors).toEqual([{ line: 151, error: "Expected 6 columns, found 4" }]);
+  });
+
+  it("an import that stops receiving chunks is reported as interrupted and can be resumed", async () => {
+    const { job } = (await post("/api/import", { format: "csv", total: 10 })).json() as { job: ImportJob };
+    await ctx.db.sql.run("UPDATE imports SET updated_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", job.id);
+    expect((await ctx.app.inject({ url: `/api/import/jobs/${job.id}` })).json().status).toBe("interrupted");
+    expect((await post(`/api/import/jobs/${job.id}/resume`)).json().status).toBe("running");
   });
 
   it("skips exact duplicates (idempotent re-import) unless asked not to", async () => {
@@ -193,12 +206,13 @@ describe("analytics, integrity, re-audit, scripts, exports", () => {
   });
   afterAll(async () => {
     await ctx.app.close();
-    ctx.db.db.close();
+    ctx.db.close();
   });
 
   it("SQL stats agree with a straightforward count over the rows", async () => {
     const stats = (await ctx.app.inject({ url: "/api/stats" })).json();
-    const rows = [...ctx.db.iterateSummaries()];
+    const rows = [];
+    for await (const r of ctx.db.iterateSummaries()) rows.push(r);
     expect(stats.metrics.totalRounds).toBe(rows.length);
     expect(stats.metrics.matching).toBe(rows.filter((r) => r.outcomeStatus === "match").length);
     expect(stats.metrics.mismatches).toBe(rows.filter((r) => r.outcomeStatus === "mismatch").length);
@@ -252,7 +266,7 @@ describe("analytics, integrity, re-audit, scripts, exports", () => {
   it("standalone scripts reproduce every game and both versions without the Lab", async () => {
     const dir = join(repoRoot, ".tmp", "scripts");
     mkdirSync(dir, { recursive: true });
-    const { rounds } = (await ctx.app.inject({ url: "/api/rounds?limit=500&batch=" + ctx.db.listImports()[0].id })).json();
+    const { rounds } = (await ctx.app.inject({ url: "/api/rounds?limit=500&batch=" + (await ctx.db.listImports())[0].id })).json();
     const picks = ["crash-1", "bj-1", "keno-1", "keno-11", "mines-6", "mines-16", "crash-6", "mines-20"].map((id) => rounds.find((r: { roundId: string }) => r.roundId === id));
     for (const r of picks) {
       const script = (await ctx.app.inject({ url: `/api/rounds/${r.id}/script` })).body;
@@ -290,7 +304,7 @@ describe("analytics, integrity, re-audit, scripts, exports", () => {
     expect(r.json().error).toMatch(/limited to 1000/);
     expect((await big.app.inject({ url: "/api/export?format=html&limit=1&ids=1" })).statusCode).toBe(200);
     await big.app.close();
-    big.db.db.close();
+    big.db.close();
   });
 
   it("HTML report contains the five evidence sections and the comparison table", async () => {
@@ -312,20 +326,20 @@ describe("analytics, integrity, re-audit, scripts, exports", () => {
     const b = (await ctx.app.inject({ method: "POST", url: "/api/backup" })).json();
     expect(existsSync(b.file)).toBe(true);
     expect(readdirSync(dirname(b.file)).length).toBeGreaterThan(0);
-    const snap = new FairnessDb(b.file);
-    expect(snap.countRounds()).toBe(ctx.db.countRounds());
-    snap.db.close();
+    const snap = await FairnessDb.open(b.file);
+    expect(await snap.countRounds()).toBe(await ctx.db.countRounds());
+    snap.close();
   });
 });
 
 describe("schema stability", () => {
-  it("re-opening a migrated database does not resurrect dropped indexes", () => {
+  it("re-opening a migrated database does not resurrect dropped indexes", async () => {
     const p = join(tmp, "reopen.db");
-    new FairnessDb(p).db.close();
-    const db = new FairnessDb(p);
-    const idx = (db.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as { name: string }[]).map((r) => r.name);
+    (await FairnessDb.open(p)).close();
+    const db = await FairnessDb.open(p);
+    const idx = (await db.sql.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'")).map((r) => r.name);
     expect(idx).not.toContain("idx_rounds_game");
     expect(idx).toContain("idx_rounds_seed_ctx");
-    db.db.close();
+    db.close();
   });
 });

@@ -7,8 +7,10 @@
  */
 import { parseCardList } from "../../../shared/src/parsing.js";
 import { gridSizeFromTileCount } from "../games/mines.js";
+import { detectFormat, iterateCsvRecords, scanCsv, unterminatedQuoteError, type ImportFormat } from "../../../shared/src/imports.js";
 
-export type ImportFormat = "csv" | "json" | "jsonl" | "auto";
+export { detectFormat, type ImportFormat } from "../../../shared/src/imports.js";
+
 
 export interface RawRow {
   line: number;
@@ -26,95 +28,8 @@ export function* iterateCsv(text: string): Generator<string[]> {
   for (const r of iterateCsvRecords(text)) yield r.cells;
 }
 
-/**
- * The CSV state machine. `line` is the physical (1-based) line on which each record starts, so error
- * messages point at the right place even with blank lines or quoted fields that span lines.
- * A quote opens a quoted field only at the start of a field; elsewhere it is literal.
- */
-function* iterateCsvRecords(text: string): Generator<{ cells: string[]; line: number }> {
-  let row: string[] = [];
-  let field = "";
-  let inQuotes = false;
-  let line = 1;
-  let recordLine = 1;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (text[i + 1] === '"') {
-          field += '"';
-          i++;
-        } else inQuotes = false;
-      } else {
-        if (ch === "\n" || (ch === "\r" && text[i + 1] !== "\n")) line++;
-        field += ch;
-      }
-    } else if (ch === '"' && field === "") inQuotes = true;
-    else if (ch === ",") {
-      row.push(field);
-      field = "";
-    }
-    else if (ch === "\n" || ch === "\r") {
-      if (ch === "\r" && text[i + 1] === "\n") i++;
-      row.push(field);
-      if (!(row.length === 1 && row[0] === "")) yield { cells: row, line: recordLine };
-      row = [];
-      field = "";
-      recordLine = ++line;
-    } else field += ch;
-  }
-  if (field !== "" || row.length) {
-    row.push(field);
-    if (!(row.length === 1 && row[0] === "")) yield { cells: row, line: recordLine };
-  }
-}
-
 export function parseCsv(text: string): string[][] {
   return [...iterateCsv(text)];
-}
-
-/**
- * Exact number of non-empty CSV records, using the same quote rules as the parser, plus the line of a
- * quoted field that is never closed. Such a field would silently swallow every following row, so the
- * file is rejected instead of guessing where the records end.
- */
-function scanCsv(text: string): { records: number; unterminatedLine: number | null } {
-  let records = 0;
-  let inQuotes = false;
-  let atFieldStart = true;
-  let empty = true;
-  let line = 1;
-  let quoteLine = 0;
-  for (let i = 0; i < text.length; i++) {
-    const c = text.charCodeAt(i);
-    if (c === 10 || (c === 13 && text.charCodeAt(i + 1) !== 10)) line++;
-    if (inQuotes) {
-      if (c === 34) {
-        if (text.charCodeAt(i + 1) === 34) i++;
-        else inQuotes = false;
-      }
-      continue;
-    }
-    if (c === 34 && atFieldStart) {
-      inQuotes = true;
-      quoteLine = line;
-      atFieldStart = false;
-      empty = false;
-    } else if (c === 10 || c === 13) {
-      if (c === 13 && text.charCodeAt(i + 1) === 10) {
-        i++;
-        line++;
-      }
-      if (!empty) records++;
-      empty = true;
-      atFieldStart = true;
-    } else {
-      atFieldStart = c === 44;
-      empty = false;
-    }
-  }
-  if (inQuotes) return { records, unterminatedLine: quoteLine };
-  return { records: empty ? records : records + 1, unterminatedLine: null };
 }
 
 const camel = (k: string) =>
@@ -289,21 +204,6 @@ export function normalizeRecord(raw: Record<string, unknown>): Record<string, un
   return out;
 }
 
-export function detectFormat(text: string): Exclude<ImportFormat, "auto"> {
-  const t = text.replace(/^﻿/, "").trimStart();
-  if (t.startsWith("[")) return "json";
-  if (t.startsWith("{")) {
-    // A single (possibly pretty-printed) JSON document vs. one object per line (v1 bug F-07).
-    try {
-      JSON.parse(t);
-      return "json";
-    } catch {
-      return "jsonl";
-    }
-  }
-  return "csv";
-}
-
 export interface ImportSource {
   format: Exclude<ImportFormat, "auto">;
   /** number of records the iterator will yield */
@@ -358,7 +258,7 @@ export function openImport(input: string, format: ImportFormat): ImportSource {
     return {
       format: fmt,
       total: 1,
-      rows: [{ line: unterminatedLine, error: `A quoted field opened on line ${unterminatedLine} is never closed, so the rows after it cannot be separated reliably. Nothing was imported; close the quote (or escape it as "") and retry.` }],
+      rows: [{ line: unterminatedLine, error: unterminatedQuoteError(unterminatedLine) }],
     };
   }
   if (records < 2) return { format: fmt, total: 1, rows: [{ line: 0, error: "CSV needs a header row and at least one data row" }] };

@@ -36,6 +36,8 @@ export const LIMITS = {
   hmacParts: 32,
   hmacPartLength: 65536,
   importBytes: 50 * 1024 * 1024,
+  /** largest chunk of a chunked import, in characters (the browser sends about half this) */
+  importChunkChars: 1_000_000,
   /** body limit for every route except imports */
   requestBytes: 4 * 1024 * 1024,
   importErrorsKept: 1000,
@@ -248,6 +250,11 @@ export interface ImportJob {
   createdAt: string;
   finishedAt: string | null;
   failure: string | null;
+  /** chunks committed so far; the next upload must carry this sequence number (idempotent retries) */
+  chunksDone: number;
+  skipDuplicates: boolean;
+  /** last progress; a running job without progress for a while is reported as interrupted */
+  updatedAt: string;
 }
 
 export interface SeedSession {

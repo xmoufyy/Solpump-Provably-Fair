@@ -1,9 +1,10 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import {
-  Binary, Bomb, Download, Fingerprint, GitCompare, Grid3x3, History, KeyRound, Layers, LayoutDashboard, Link2, Rocket, Settings, ShieldCheck, Spade,
+  Binary, Bomb, Download, Fingerprint, GitCompare, Grid3x3, History, KeyRound, Layers, LayoutDashboard, Link2, LogOut, Rocket, Settings, ShieldCheck, Spade,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { checkHealth, SERVER_DOWN_MESSAGE } from "@/services/api";
+import { api, AUTH_REQUIRED_EVENT, checkHealth, SERVER_DOWN_MESSAGE } from "@/services/api";
+import { LoginScreen } from "@/components/LoginScreen";
 
 // Route-level code splitting: charts (Recharts) and rarely used tools are only downloaded when opened.
 const DashboardPage = lazy(() => import("@/pages/DashboardPage").then((m) => ({ default: m.DashboardPage })));
@@ -65,6 +66,19 @@ function readHash() {
 export default function App() {
   const [{ route, arg, params }, setLoc] = useState(readHash);
   const [serverUp, setServerUp] = useState(true);
+  // "required": show the sign-in screen. loginInUse: a password protects this deployment (offer Sign out).
+  const [auth, setAuth] = useState<{ state: "checking" | "ok" | "required"; configured: boolean; loginInUse: boolean }>({ state: "checking", configured: true, loginInUse: false });
+  const [session, setSession] = useState(0);
+
+  useEffect(() => {
+    api
+      .authStatus()
+      .then((s) => setAuth({ state: s.authenticated ? "ok" : "required", configured: s.configured, loginInUse: s.required }))
+      .catch(() => setAuth((a) => ({ ...a, state: "ok" }))); // server unreachable: the banner explains
+    const onRequired = () => setAuth((a) => ({ ...a, state: "required", loginInUse: true }));
+    window.addEventListener(AUTH_REQUIRED_EVENT, onRequired);
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, onRequired);
+  }, []);
 
   useEffect(() => {
     const on = () => setLoc(readHash());
@@ -90,6 +104,15 @@ export default function App() {
   }, []);
 
   const go = (r: string) => (window.location.hash = `/${r}`);
+  const signOut = async () => {
+    await api.logout().catch(() => {});
+    setAuth((a) => ({ ...a, state: "required" }));
+  };
+
+  if (auth.state === "checking") return <p className="p-6 text-sm text-muted">Loading…</p>;
+  if (auth.state === "required") {
+    return <LoginScreen configured={auth.configured} onSignedIn={() => (setAuth((a) => ({ ...a, state: "ok" })), setSession((n) => n + 1))} />;
+  }
   const openRound = (id: number) => go(`history/${id}`);
 
   let page: React.ReactNode;
@@ -147,7 +170,14 @@ export default function App() {
             </div>
           ))}
         </nav>
-        <div className="border-t border-line px-5 py-3 text-[11px] text-muted">Independent verifier · read-only · no wallet</div>
+        <div className="flex items-center justify-between gap-2 border-t border-line px-5 py-3 text-[11px] text-muted">
+          <span>Independent verifier · read-only · no wallet</span>
+          {auth.loginInUse && (
+            <button onClick={signOut} className="inline-flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 hover:text-fg" data-testid="sign-out">
+              <LogOut className="h-3.5 w-3.5" aria-hidden /> Sign out
+            </button>
+          )}
+        </div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
         <nav className="flex gap-1 overflow-x-auto border-b border-line bg-panel px-3 py-2 scrollbar-thin lg:hidden" aria-label="Main navigation (compact)">
@@ -156,6 +186,11 @@ export default function App() {
               {it.label}
             </a>
           ))}
+          {auth.loginInUse && (
+            <button onClick={signOut} className="whitespace-nowrap rounded-md px-2.5 py-1 text-xs text-muted">
+              Sign out
+            </button>
+          )}
         </nav>
         {!serverUp && (
           <div role="alert" data-testid="server-down" className="border-b border-bad/40 bg-bad/10 px-6 py-2.5 text-sm text-bad">
@@ -163,7 +198,10 @@ export default function App() {
           </div>
         )}
         <main id="main" tabIndex={-1} className="flex-1 overflow-y-auto px-4 py-6 outline-none scrollbar-thin sm:px-8">
-          <Suspense fallback={<p className="text-sm text-muted">Loading…</p>}>{page}</Suspense>
+          <Suspense fallback={<p className="text-sm text-muted">Loading…</p>}>
+            {/* remounted after signing in again, so pages reload their data */}
+            <div key={session}>{page}</div>
+          </Suspense>
         </main>
       </div>
     </div>
