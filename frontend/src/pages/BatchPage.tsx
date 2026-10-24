@@ -2,13 +2,28 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { FileUp, Layers, Pause, Play, Square } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle, Label, Segmented, Textarea } from "@/components/ui";
 import { PageHeader, StatusBadge } from "@/components/verification";
-import { api, type ImportJob } from "@/services/api";
+import { api, ApiError, type ImportJob } from "@/services/api";
+import { planImport, type ImportChunk } from "@shared/imports";
 import { cn } from "@/lib/utils";
 
 const CSV_TEMPLATE = "round_id,game,algorithm_version,server_seed,client_seed,nonce,difficulty,selected_numbers,grid_size,mine_count,clicked_tiles,index_base,card_count,reported_outcome,commitment,timestamp,source";
 const MAX_BYTES = 50 * 1024 * 1024;
 /** Files larger than this are kept out of the textarea: rendering megabytes into a controlled textarea freezes the page. */
 const INLINE_LIMIT = 200_000;
+/** Characters per uploaded chunk: well under the server's limit, and under hosting request limits even for multi-byte text. */
+const CHUNK_CHARS = 400_000;
+
+/** Network failures are retried: the server applies each numbered chunk at most once. Server refusals are not. */
+async function sendWithRetry(id: string, seq: number, chunk: ImportChunk): Promise<ImportJob> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await api.sendChunk(id, seq, chunk.text, chunk.lineOffset);
+    } catch (e) {
+      if (!(e instanceof ApiError) || (e.status !== 0 && e.status < 500) || attempt >= 4) throw e;
+      await new Promise((r) => setTimeout(r, 500 * attempt));
+    }
+  }
+}
 
 export function BatchPage() {
   const [text, setText] = useState("");
@@ -20,29 +35,22 @@ export function BatchPage() {
   const [job, setJob] = useState<ImportJob | null>(null);
   const [imports, setImports] = useState<ImportJob[]>([]);
   const [reaudit, setReaudit] = useState<string | null>(null);
-  const timer = useRef<number | null>(null);
+  // The upload loop's controls live in a ref: the loop reads them between chunks.
+  const upload = useRef<{ paused: boolean; cancelled: boolean; resume: (() => void) | null }>({ paused: false, cancelled: false, resume: null });
 
   const refreshImports = useCallback(() => api.imports().then(setImports).catch(() => {}), []);
   useEffect(() => {
     refreshImports();
-    return () => {
-      if (timer.current) window.clearTimeout(timer.current);
-    };
   }, [refreshImports]);
 
-  const poll = useCallback(
-    (id: string) => {
-      api
-        .importJob(id)
-        .then((j) => {
-          setJob(j);
-          if (j.status === "running" || j.status === "paused") timer.current = window.setTimeout(() => poll(id), 400);
-          else refreshImports();
-        })
-        .catch((e) => setError(e.message));
-    },
-    [refreshImports],
-  );
+  const active = job !== null && (job.status === "running" || job.status === "paused");
+  // Leaving the page stops the upload (the browser sends the file); warn before that happens.
+  useEffect(() => {
+    if (!active) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [active]);
 
   const onFile = async (f: File | undefined) => {
     if (!f) return;
@@ -60,24 +68,48 @@ export function BatchPage() {
     if (ext === "csv" || ext === "json" || ext === "jsonl") setFormat(ext);
   };
 
+  /**
+   * Uploads the file as numbered chunks, one at a time. Each chunk is verified and committed on the
+   * server before the next is sent, so pausing, cancelling or losing the connection never leaves a
+   * half-written chunk; a chunk whose response was lost is simply sent again (the server applies it once).
+   */
   const start = async () => {
     setError(null);
     setReaudit(null);
+    const plan = planImport(fileText ?? text, format, CHUNK_CHARS);
+    if (plan.error) return setError(plan.error);
+    const ctl: typeof upload.current = { paused: false, cancelled: false, resume: null };
+    upload.current = ctl;
     try {
-      const { job } = await api.startImport(fileText ?? text, format, filename, skipDuplicates);
-      setJob(job);
-      poll(job.id);
+      let current = (await api.createImport({ format: plan.format, total: plan.total, filename, skipDuplicates })).job;
+      setJob(current);
+      for (let seq = 0; seq < plan.chunks.length; seq++) {
+        if (ctl.paused) await new Promise<void>((r) => (ctl.resume = r));
+        if (ctl.cancelled) return refreshImports();
+        current = await sendWithRetry(current.id, seq, plan.chunks[seq]);
+        setJob(current);
+      }
+      setJob(await api.controlImport(current.id, "finish"));
+      refreshImports();
     } catch (e) {
-      setError((e as Error).message);
+      setError(`${(e as Error).message} The rows committed so far are complete and kept; importing the same file again skips them.`);
+      refreshImports();
     }
   };
   const control = async (action: "pause" | "resume" | "cancel") => {
     if (!job) return;
+    const ctl = upload.current;
+    if (action === "pause") ctl.paused = true;
+    if (action === "cancel") ctl.cancelled = true;
     try {
       setJob(await api.controlImport(job.id, action));
-      poll(job.id);
     } catch (e) {
       setError((e as Error).message);
+    }
+    if (action !== "pause") {
+      ctl.paused = false;
+      ctl.resume?.();
+      ctl.resume = null;
     }
   };
   const rerun = async (batch: string) => {
@@ -85,7 +117,6 @@ export function BatchPage() {
     setReaudit(`Re-audited ${r.rounds} rounds: ${r.reproduced} reproduced exactly, ${r.statusChanged} status change(s) (previous audits kept).`);
   };
 
-  const active = job && (job.status === "running" || job.status === "paused");
   const pct = job && job.total ? Math.min(100, Math.round((100 * job.processed) / job.total)) : 0;
 
   return (
@@ -93,7 +124,7 @@ export function BatchPage() {
       <PageHeader
         icon={<Layers className="h-5 w-5" />}
         title="Batch Verification"
-        subtitle="Import recorded Solpump rounds (CSV, JSON, JSONL or pasted). Rows are verified in the background in small transactions — you can keep using the app, pause or cancel. Keno and Mines rows must state their algorithm version; it is never guessed."
+        subtitle="Import recorded Solpump rounds (CSV, JSON, JSONL or pasted). Large files are uploaded in pieces; each piece is verified and committed before the next, so you can pause or cancel at any time. Keep this page open until the import finishes. Keno and Mines rows must state their algorithm version; it is never guessed."
       />
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_420px]">
         <Card>

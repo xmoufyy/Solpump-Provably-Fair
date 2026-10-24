@@ -1,4 +1,4 @@
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { Param, Sql } from "../database/sql.js";
 import type { FindingKind, IntegrityFinding, IntegrityReport } from "../../../shared/src/contracts.js";
 
 /**
@@ -25,17 +25,17 @@ const MAX_FINDINGS_PER_CHECK = 100;
  *  - data_quality:  missing or invalid evidence
  * None of these is, by itself, proof of manipulation.
  */
-export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
+export async function runIntegrityAudit(db: Sql): Promise<IntegrityReport> {
   const findings: IntegrityFinding[] = [];
   let truncated = false;
-  const checked = (db.prepare("SELECT COUNT(*) AS n FROM rounds").get() as { n: number }).n;
+  const checked = Number((await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM rounds"))?.n ?? 0);
   const ids = (s: unknown) => String(s ?? "").split(",").filter(Boolean).slice(0, MAX_IDS).map(Number);
   const add = (f: Omit<IntegrityFinding, "roundIds" | "totalRounds"> & { idList: unknown; total: number }) => {
     const { idList, total, ...rest } = f;
     findings.push({ ...rest, roundIds: ids(idList), totalRounds: total });
   };
-  const q = <T>(sql: string, ...p: SQLInputValue[]) => {
-    const rows = db.prepare(`${sql} LIMIT ${MAX_FINDINGS_PER_CHECK + 1}`).all(...p) as T[];
+  const q = async <T>(sql: string, ...p: Param[]) => {
+    const rows = await db.all<T>(`${sql} LIMIT ${MAX_FINDINGS_PER_CHECK + 1}`, ...p);
     if (rows.length > MAX_FINDINGS_PER_CHECK) {
       truncated = true;
       rows.length = MAX_FINDINGS_PER_CHECK;
@@ -47,7 +47,7 @@ export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
   const game = (g: string) => g.charAt(0).toUpperCase() + g.slice(1);
 
   // 1. Same game + round id recorded more than once
-  for (const r of q<Record<string, string | number>>(
+  for (const r of await q<Record<string, string | number>>(
     `SELECT game, round_id, COUNT(*) AS n, COUNT(DISTINCT COALESCE(recorded_json,'')) AS outcomes,
        COUNT(DISTINCT ${ctx} || ${SEP} || COALESCE(json_extract(inputs_json,'$.difficulty'),'') || ${SEP} || COALESCE(json_extract(inputs_json,'$.gridSize'),'') || ${SEP} || COALESCE(json_extract(inputs_json,'$.mineCount'),'')) AS inputs,
        group_concat(id) AS ids
@@ -69,7 +69,7 @@ export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
   }
 
   // 2. Keno/Mines: same server seed + client seed + nonce on different rounds
-  for (const r of q<Record<string, string | number>>(
+  for (const r of await q<Record<string, string | number>>(
     `SELECT game, nonce, COUNT(DISTINCT COALESCE(round_id, '#' || id)) AS rounds, COUNT(DISTINCT COALESCE(calculated_json,'')) AS calcs,
        COUNT(DISTINCT CASE WHEN recorded_json IS NOT NULL THEN recorded_json END) AS outcomes, group_concat(id) AS ids, COUNT(*) AS n
      FROM rounds WHERE game IN ('keno','mines') AND server_seed IS NOT NULL AND nonce IS NOT NULL
@@ -92,7 +92,7 @@ export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
   }
 
   // 3. Crash / Blackjack: no nonce, so a seed pair should belong to one round
-  for (const r of q<Record<string, string | number>>(
+  for (const r of await q<Record<string, string | number>>(
     `SELECT game, COUNT(DISTINCT COALESCE(round_id, '#' || id)) AS rounds, group_concat(id) AS ids, COUNT(*) AS n,
        COUNT(DISTINCT CASE WHEN game = 'crash' THEN json_extract(recorded_json, '$.multiplier') END) AS multipliers
      FROM rounds WHERE game IN ('crash','blackjack') AND server_seed IS NOT NULL
@@ -115,7 +115,7 @@ export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
   }
 
   // 4. Mixed algorithm versions within one seed pair
-  for (const r of q<Record<string, string | number>>(
+  for (const r of await q<Record<string, string | number>>(
     `SELECT game, group_concat(DISTINCT algorithm_version) AS versions, group_concat(id) AS ids, COUNT(*) AS n
      FROM rounds WHERE game IN ('keno','mines') AND server_seed IS NOT NULL
      GROUP BY game, server_seed, client_seed HAVING COUNT(DISTINCT algorithm_version) > 1`,
@@ -132,7 +132,7 @@ export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
   }
 
   // 5. Nonce going backwards within a seed pair, ordered by round timestamp
-  for (const r of q<Record<string, string | number>>(
+  for (const r of await q<Record<string, string | number>>(
     `SELECT game, COUNT(*) AS n, group_concat(id) AS ids FROM (
        SELECT id, game, server_seed, client_seed, ${NUMERIC_NONCE_KEY} AS nn,
          LAG(${NUMERIC_NONCE_KEY}) OVER (PARTITION BY game, server_seed, client_seed ORDER BY round_timestamp, id) AS prev
@@ -151,7 +151,7 @@ export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
   }
 
   // 6. One commitment recorded for different server seeds (a hash commits to exactly one value)
-  for (const r of q<Record<string, string | number>>(
+  for (const r of await q<Record<string, string | number>>(
     `SELECT commitment, COUNT(DISTINCT server_seed) AS seeds, group_concat(id) AS ids, COUNT(*) AS n
      FROM rounds WHERE commitment IS NOT NULL AND server_seed IS NOT NULL GROUP BY commitment HAVING seeds > 1`,
   )) {
@@ -167,8 +167,7 @@ export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
   }
 
   // 7. Server-seed rotation without any recorded commitment for the new seed
-  const rot = db
-    .prepare(
+  const rot = (await db.get<{ n: number; ids: string | null }>(
       // committed seeds are materialised once (a correlated NOT EXISTS here was O(n^2): 263 s at 10k rows)
       `WITH committed AS MATERIALIZED (SELECT DISTINCT server_seed FROM rounds WHERE commitment IS NOT NULL),
        cur AS (
@@ -177,8 +176,7 @@ export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
        )
        SELECT COUNT(*) AS n, group_concat(id) AS ids FROM cur
        WHERE prev IS NOT NULL AND prev <> server_seed AND server_seed NOT IN (SELECT server_seed FROM committed)`,
-    )
-    .get() as { n: number; ids: string | null };
+  ))!;
   if (rot.n) {
     add({
       check: "rotation_without_commitment",
@@ -243,7 +241,7 @@ export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
     },
   ];
   const cols = STATUS_CHECKS.map((c, i) => `SUM(CASE WHEN ${c.cond} THEN 1 ELSE 0 END) AS n${i}, group_concat(CASE WHEN ${c.cond} THEN id END) AS ids${i}`).join(", ");
-  const row = db.prepare(`SELECT ${cols} FROM rounds`).get() as Record<string, number | string | null>;
+  const row = (await db.get<Record<string, number | string | null>>(`SELECT ${cols} FROM rounds`))!;
   STATUS_CHECKS.forEach((c, i) => {
     const n = Number(row[`n${i}`] ?? 0);
     if (!n) return;

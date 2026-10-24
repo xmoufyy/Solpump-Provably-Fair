@@ -9,3 +9,4 @@ playwright-report
 frontend/test-results
 frontend/playwright-report
 data/backups
+.vercel

@@ -80,7 +80,7 @@ const imports: unknown[] = [];
 for (const n of sizes) {
   const dir = mkdtempSync(join(tmpdir(), "sfl-bench-"));
   const dbPath = join(dir, "bench.db");
-  const { app, db } = await buildApp({ db: new FairnessDb(dbPath) });
+  const { app, db } = await buildApp({ db: await FairnessDb.open(dbPath) });
   const text = csvRows(n);
   global.gc?.();
   const rss0 = process.memoryUsage().rss;
@@ -126,12 +126,16 @@ for (const n of sizes) {
     exportCsv: await time("/api/export?format=csv"),
   };
   await app.close();
-  db.db.close();
+  db.close();
   const dbBytes = statSync(dbPath).size + (() => { try { return statSync(dbPath + "-wal").size; } catch { return 0; } })();
   const row = { rows: n, csvBytes: text.length, stored, importMs: Math.round(importMs), rowsPerSecond: Math.round(n / (importMs / 1000)), peakRssDeltaMB: Math.round((peak - rss0) / 1e6), maxEventLoopStallMs: Math.round(Math.max(maxStall, 0)), healthProbeMaxMs: Math.round(probeMax), healthProbes: probes, dbMB: +(dbBytes / 1e6).toFixed(1), queries: q };
   console.log(JSON.stringify(row));
   imports.push(row);
-  rmSync(dir, { recursive: true, force: true });
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* libSQL can hold the file until garbage collection on Windows */
+  }
 }
 results.imports = imports;
 if (out) writeFileSync(out, JSON.stringify(results, null, 2));

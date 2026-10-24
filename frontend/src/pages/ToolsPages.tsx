@@ -316,8 +316,16 @@ export function SettingsPage() {
                 {meta.migration && ` · upgraded from v${meta.migration.from} at startup${meta.migration.backup ? ` (backup: ${meta.migration.backup})` : ""}`}
               </p>
             )}
-            <Button variant="secondary" onClick={backup}><DatabaseBackup className="h-4 w-4" aria-hidden /> Create database backup</Button>
-            <p className="text-xs text-muted">Records are never deleted automatically. Backups are consistent snapshots written to data\backups.</p>
+            {meta?.hosted ? (
+              <p className="text-xs text-muted" data-testid="hosted-backup-note">
+                Records are never deleted automatically. This deployment stores them in a hosted database, whose provider (Turso) keeps backups with point-in-time restore. For a portable copy, use the JSON export.
+              </p>
+            ) : (
+              <>
+                <Button variant="secondary" onClick={backup}><DatabaseBackup className="h-4 w-4" aria-hidden /> Create database backup</Button>
+                <p className="text-xs text-muted">Records are never deleted automatically. Backups are consistent snapshots written to data\backups.</p>
+              </>
+            )}
           </CardContent>
         </Card>
         {msg && <p className="text-sm text-muted" role="status">{msg}</p>}

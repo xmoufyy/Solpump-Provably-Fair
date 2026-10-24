@@ -21,10 +21,13 @@
     "test:parity": "npm run test:parity -w backend",
     "test:e2e": "npm run test:e2e -w frontend",
     "bench": "npm run bench -w backend",
-    "audit:all": "node scripts/audit-all.mjs"
+    "audit:all": "node scripts/audit-all.mjs",
+    "build:api": "esbuild backend/src/vercel.ts --bundle --platform=node --target=node22 --format=esm --packages=external --sourcemap --outfile=backend/dist/vercel.mjs",
+    "build:vercel": "npm run build && npm run build:api"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
+    "esbuild": "0.28.2",
     "eslint": "^9.39.5",
     "eslint-plugin-react-hooks": "^5.2.0",
     "globals": "^15.15.0",

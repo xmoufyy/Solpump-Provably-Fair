@@ -8,7 +8,7 @@ import { buildApp } from "../src/api/app.js";
 import { FairnessDb } from "../src/database/db.js";
 
 const dir = mkdtempSync(join(tmpdir(), "sfl-pi-"));
-const { app, db } = await buildApp({ db: new FairnessDb(join(dir, "p.db")) });
+const { app, db } = await buildApp({ db: await FairnessDb.open(join(dir, "p.db")) });
 const lines = ["round_id,game,algorithm_version,server_seed,client_seed,nonce,grid_size,mine_count,reported_outcome,source"];
 for (let i = 0; i < 20000; i++) lines.push(`r${i},mines,hmac_sha256_v2,${createHash("sha256").update(String(i)).digest("hex")},cli,${i},5,3,0 1 2,bench`);
 const s = new Session();
@@ -30,5 +30,9 @@ const byId = new Map(profile.nodes.map((n) => [n.id, n]));
 const total = [...self.values()].reduce((a, b) => a + b, 0);
 for (const [k, v] of [...self.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14)) console.log(`${((100 * v) / total).toFixed(1).padStart(5)}%  ${k}`);
 await app.close();
-db.db.close();
-rmSync(dir, { recursive: true, force: true });
+db.close();
+try {
+  rmSync(dir, { recursive: true, force: true });
+} catch {
+  /* libSQL can hold the file until garbage collection on Windows; it stays in the temp folder */
+}
