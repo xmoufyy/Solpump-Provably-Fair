@@ -56,6 +56,7 @@ run("Independent Python parity run", npm, ["run", "test:parity"], {
 });
 run("Integration tests", npm, ["run", "test:integration"], { parse: vitestCounts });
 run("Production build", npm, ["run", "build"]);
+run("Vercel function bundle loads", npm, ["run", "check:vercel"]);
 run("Browser tests (Playwright)", npm, ["run", "test:e2e"], {
   skipIf: chromium,
   parse: (o) => (stripAnsi(o).match(/(\d+ passed[^\n]*|\d+ failed[^\n]*)/) ?? [])[1] ?? "",
