@@ -36,6 +36,8 @@ export const LIMITS = {
   hmacParts: 32,
   hmacPartLength: 65536,
   importBytes: 50 * 1024 * 1024,
+  /** body limit for every route except imports */
+  requestBytes: 4 * 1024 * 1024,
   importErrorsKept: 1000,
   htmlPdfExportRounds: 1000,
   jsonExportTraceRounds: 2000,
@@ -306,4 +308,22 @@ export const VERSION_LABELS: Record<string, string> = {
   seedrandom_v1: "Seedrandom V1 (legacy)",
   crash_hmac_sha256_v1: "Crash HMAC-SHA256",
   blackjack_hmac_sha256_card_v1: "Blackjack per-card HMAC",
+};
+
+/**
+ * Plain-language meaning of each separate conclusion: what the status shows, and what evidence would be
+ * needed to say more. Kept next to the status labels so the verifier, history and reports cannot drift.
+ */
+export const EVIDENCE_EXPLANATIONS: Record<OutcomeStatus | CommitmentStatus | TimingStatus, { shows: string; missing?: string }> = {
+  reconstructed: { shows: "The outcome was calculated from the seeds you entered.", missing: "Enter the outcome Solpump showed to compare it with the calculation." },
+  match: { shows: "The recorded outcome equals the calculation from the revealed seeds, under the algorithm version on the record.", missing: "This alone does not show the seeds were fixed before the round (see commitment and timing)." },
+  mismatch: { shows: "The recorded outcome differs from the calculation. Check seeds, nonce, settings and algorithm version for transcription errors first." },
+  missing_comparison: { shows: "The record claims to be historical but has no recorded outcome, so nothing was compared.", missing: "Add the outcome Solpump showed for this round." },
+  invalid_input: { shows: "Some inputs are missing or invalid, so nothing was calculated.", missing: "Fix the fields listed above." },
+  unsupported_version: { shows: "The record names an algorithm version this Lab does not implement. No other version is substituted.", missing: "A published reference for that version." },
+  verified: { shows: "SHA-256 of the revealed server seed equals the supplied commitment, under the scheme you confirmed in Settings.", missing: "When the commitment was published is a separate question (timing)." },
+  scheme_unconfirmed: { shows: "A commitment was supplied, but Solpump's commitment construction is not confirmed; SHA-256(server seed) is only a candidate.", missing: "Confirmation of Solpump's exact commitment scheme." },
+  not_supplied: { shows: "No commitment (server seed hash) was supplied.", missing: "The hash Solpump displayed before the round, with its source." },
+  pre_round_publication_verified: { shows: "Independent, timestamped evidence shows the commitment was published before the round." },
+  publication_timing_unverified: { shows: "Nothing independent shows the commitment existed before the round.", missing: "Timestamped evidence linked to this round, e.g. a confirmed on-chain publication of the commitment." },
 };

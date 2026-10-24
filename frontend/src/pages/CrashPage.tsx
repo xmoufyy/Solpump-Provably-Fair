@@ -27,7 +27,7 @@ export function CrashPage() {
         title="Crash Verification"
         subtitle="HMAC-SHA256 keyed with the server seed over the public seed. If the full 256-bit digest is divisible by 20 the round crashes instantly at 1.00x; otherwise the first 52 bits set the multiplier. There is no nonce."
       />
-      <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[360px_1fr]">
         <Card>
           <CardContent className="space-y-5">
             <SeedFields value={seeds} onChange={setSeeds} errors={errors} withNonce={false} clientLabel="Public Seed" />
@@ -45,7 +45,7 @@ export function CrashPage() {
               <FieldError>{reportedErr}</FieldError>
               <p className="mt-1 text-xs text-muted">Compared exactly: the algorithm only produces whole hundredths, so 1.254 is not 1.25.</p>
             </div>
-            <VerifyBar onRun={() => !reportedErr && v.run(input)} onSave={() => !reportedErr && v.run(input, true)} busy={v.busy} saved={v.saved} error={v.error} />
+            <VerifyBar onRun={() => !reportedErr && v.run(input)} onSave={() => !reportedErr && v.run(input, true)} busy={v.busy} saved={v.saved} error={v.error} stale={stale} />
           </CardContent>
         </Card>
         <div className="space-y-6">

@@ -40,6 +40,7 @@ export function toJson(rounds: StoredRound[], traceIncluded: boolean): string {
       generator: `Solpump Fairness Lab ${APP_VERSION}`,
       generatedAt: new Date().toISOString(),
       note: "'recordedEvidence' is what was supplied or imported. 'calculated' is independently reconstructed from the revealed seeds using the stated algorithm version.",
+      limitations: LIMITATIONS,
       traceIncluded,
       ...(traceIncluded ? {} : { traceNote: "Traces omitted for large exports; every trace can be regenerated from the recorded inputs (deterministic algorithms), e.g. with the per-round standalone script." }),
       rounds: rounds.map((r) => ({
@@ -200,6 +201,13 @@ export function toPdf(rounds: StoredRound[]): Promise<Buffer> {
     doc.on("error", reject);
     // Built-in PDF fonts are Latin-1 only; replace anything else so text never renders as garbage.
     const ascii = (s: unknown) => String(s ?? "").replace(/[^\x20-\x7e\n]/g, "?");
+    // Exact inputs must stay unambiguous: quoted (so surrounding spaces are visible) and, when they contain
+    // characters the PDF font cannot show, followed by their UTF-8 bytes instead of a lossy "?" rendering.
+    const exact = (s: string | null) => {
+      if (s === null) return "-";
+      const shown = ascii(JSON.stringify(s));
+      return /^[\x20-\x7e]*$/.test(s) ? shown : `${shown} (non-ASCII shown as ?; UTF-8 hex ${Buffer.from(s, "utf8").toString("hex")})`;
+    };
 
     doc.fontSize(18).text("Solpump Fairness Lab - verification report");
     doc.moveDown(0.3).fontSize(9).fillColor("#555").text(`Generated ${new Date().toISOString()} by Solpump Fairness Lab ${APP_VERSION}. ${rounds.length} record(s).`);
@@ -210,7 +218,7 @@ export function toPdf(rounds: StoredRound[]): Promise<Buffer> {
       doc.fillColor("#000").fontSize(14).text(`${r.game.toUpperCase()} - round ${ascii(r.roundId ?? "(no id)")}  (record #${r.id})`);
       doc.moveDown(0.2).fontSize(11).fillColor(["mismatch", "commitment_mismatch"].includes(r.overallStatus) ? "#b91c1c" : "#1d4ed8").text(`Final assessment: ${label(r.overallStatus)}`);
       doc.moveDown(0.4).fontSize(9).fillColor("#222");
-      doc.text(`Server seed: ${ascii(r.serverSeed)}`).text(`Client/public seed: ${ascii(r.clientSeed)}`).text(`Nonce: ${ascii(r.nonce ?? "-")}    Algorithm: ${ascii(r.algorithmVersion)}`);
+      doc.text(`Server seed: ${exact(r.serverSeed)}`).text(`Client/public seed: ${exact(r.clientSeed)}`).text(`Nonce: ${exact(r.nonce)}    Algorithm: ${ascii(r.algorithmVersion)}`);
       doc.moveDown(0.4).fontSize(10).fillColor("#000").text("Reported vs reconstructed");
       doc.fontSize(8.5).fillColor("#222");
       for (const c of r.result.comparisons ?? []) {

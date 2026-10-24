@@ -78,3 +78,31 @@ export function summarizeOutcome(game: string, o: unknown): string {
   }
   return "";
 }
+
+/** Invisible characters by code point (numeric so this source file stays plain ASCII). */
+const INVISIBLE = new Map<number, string>([
+  [0x00a0, "no-break space"], [0x00ad, "soft hyphen"], [0x180e, "Mongolian vowel separator"], [0x200b, "zero-width space"],
+  [0x200c, "zero-width non-joiner"], [0x200d, "zero-width joiner"], [0x200e, "left-to-right mark"], [0x200f, "right-to-left mark"],
+  [0x2028, "line separator"], [0x2029, "paragraph separator"], [0x202f, "narrow no-break space"], [0x2060, "word joiner"], [0xfeff, "byte order mark"],
+]);
+const isBidiControl = (cp: number) => (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069);
+
+/**
+ * Characters in a seed that a person is unlikely to have meant: surrounding whitespace, invisible or
+ * direction-changing characters, control characters. Purely advisory - the value is never modified,
+ * because the exact bytes are what the casino hashed.
+ */
+export function seedHazards(value: string): string[] {
+  const out: string[] = [];
+  if (/^\s|\s$/u.test(value)) out.push("leading or trailing whitespace");
+  const seen = new Map<string, number[]>();
+  [...value].forEach((ch, i) => {
+    const cp = ch.codePointAt(0)!;
+    const named = INVISIBLE.get(cp) ?? (cp < 0x20 || cp === 0x7f ? "control character" : isBidiControl(cp) ? "bidirectional control" : null);
+    if (!named) return;
+    const key = `${named} (U+${cp.toString(16).toUpperCase().padStart(4, "0")})`;
+    seen.set(key, [...(seen.get(key) ?? []), i + 1]);
+  });
+  for (const [k, pos] of seen) out.push(`${k} at position${pos.length > 1 ? "s" : ""} ${pos.slice(0, 5).join(", ")}${pos.length > 5 ? ", ..." : ""}`);
+  return out;
+}

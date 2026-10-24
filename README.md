@@ -5,7 +5,7 @@ It rebuilds game outcomes from revealed seeds, compares them with recorded outco
 
 It is read-only: no betting, no wallet, no keys, and no automation of play.
 
-> **Version 2.0** is the result of a full code audit. See [`docs/COMPREHENSIVE_AUDIT.md`](docs/COMPREHENSIVE_AUDIT.md) for findings and fixes, [`docs/CRYPTOGRAPHIC_PARITY_REPORT.md`](docs/CRYPTOGRAPHIC_PARITY_REPORT.md) for how the algorithms were validated (and what remains unconfirmed), [`docs/PERFORMANCE_REPORT.md`](docs/PERFORMANCE_REPORT.md), and [`docs/CHANGELOG_V2.md`](docs/CHANGELOG_V2.md).
+> **Version 2.0** is the result of a full code audit. See [`docs/COMPREHENSIVE_AUDIT.md`](docs/COMPREHENSIVE_AUDIT.md) for findings and fixes, [`docs/CRYPTOGRAPHIC_PARITY_REPORT.md`](docs/CRYPTOGRAPHIC_PARITY_REPORT.md) for how the algorithms were validated (and what remains unconfirmed), [`docs/PERFORMANCE_REPORT.md`](docs/PERFORMANCE_REPORT.md), and [`docs/CHANGELOG_V2.md`](docs/CHANGELOG_V2.md). The follow-up audit of 2026-10-24 is in [`docs/AUDIT_2026-10-24.md`](docs/AUDIT_2026-10-24.md).
 
 ---
 

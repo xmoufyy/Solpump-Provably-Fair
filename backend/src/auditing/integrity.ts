@@ -1,6 +1,17 @@
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import type { FindingKind, IntegrityFinding, IntegrityReport } from "../../../shared/src/contracts.js";
 
+/**
+ * SQL sort key for decimal nonces: left-padded to a fixed width, so text order equals numeric order for
+ * every nonce the schema accepts (<= 128 digits). CAST(nonce AS INTEGER) saturates beyond 2^63, and
+ * node:sqlite returns integers beyond 2^53 rounded, which mis-ordered and mis-displayed large nonces.
+ * NULL for nonces that are not plain decimal digits.
+ */
+const NONCE_WIDTH = 128;
+export const NUMERIC_NONCE_KEY = `CASE WHEN nonce <> '' AND nonce NOT GLOB '*[^0-9]*' THEN substr('${"0".repeat(NONCE_WIDTH)}' || nonce, -${NONCE_WIDTH}) END`;
+/** Inverse of NUMERIC_NONCE_KEY for display (the numeric value; leading zeros of the original are not kept). */
+export const nonceFromKey = (key: unknown): string | null => (typeof key === "string" ? key.replace(/^0+(?=\d)/, "") : null);
+
 const MAX_IDS = 200; // per finding
 const MAX_FINDINGS_PER_CHECK = 100;
 
@@ -82,16 +93,22 @@ export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
 
   // 3. Crash / Blackjack: no nonce, so a seed pair should belong to one round
   for (const r of q<Record<string, string | number>>(
-    `SELECT game, COUNT(DISTINCT COALESCE(round_id, '#' || id)) AS rounds, group_concat(id) AS ids, COUNT(*) AS n
+    `SELECT game, COUNT(DISTINCT COALESCE(round_id, '#' || id)) AS rounds, group_concat(id) AS ids, COUNT(*) AS n,
+       COUNT(DISTINCT CASE WHEN game = 'crash' THEN json_extract(recorded_json, '$.multiplier') END) AS multipliers
      FROM rounds WHERE game IN ('crash','blackjack') AND server_seed IS NOT NULL
      GROUP BY game, server_seed, client_seed HAVING rounds > 1 ORDER BY rounds DESC`,
   )) {
+    // Crash has one result per seed pair, so two different reported multipliers cannot both be true.
+    // (Blackjack records may legitimately report different numbers of cards from the same sequence.)
+    const contradiction = Number(r.multipliers) > 1;
     add({
-      check: "seed_pair_reuse",
-      kind: "anomaly",
-      severity: "warning",
-      title: `${game(String(r.game))}: one seed pair used for ${r.rounds} rounds`,
-      detail: "The published algorithm has no nonce, so rounds sharing a seed pair must have identical outcomes.",
+      check: contradiction ? "seed_pair_reuse_conflicting_outcomes" : "seed_pair_reuse",
+      kind: contradiction ? "contradiction" : "anomaly",
+      severity: contradiction ? "attention" : "warning",
+      title: `${game(String(r.game))}: one seed pair used for ${r.rounds} rounds${contradiction ? ` with ${r.multipliers} different reported multipliers` : ""}`,
+      detail: contradiction
+        ? "The published Crash algorithm has no nonce: one seed pair yields exactly one multiplier, yet these records report different ones. They cannot all be correct."
+        : "The published algorithm has no nonce, so rounds sharing a seed pair must have identical outcomes.",
       idList: r.ids,
       total: Number(r.n),
     });
@@ -117,8 +134,8 @@ export function runIntegrityAudit(db: DatabaseSync): IntegrityReport {
   // 5. Nonce going backwards within a seed pair, ordered by round timestamp
   for (const r of q<Record<string, string | number>>(
     `SELECT game, COUNT(*) AS n, group_concat(id) AS ids FROM (
-       SELECT id, game, server_seed, client_seed, CAST(nonce AS INTEGER) AS nn,
-         LAG(CAST(nonce AS INTEGER)) OVER (PARTITION BY game, server_seed, client_seed ORDER BY round_timestamp, id) AS prev
+       SELECT id, game, server_seed, client_seed, ${NUMERIC_NONCE_KEY} AS nn,
+         LAG(${NUMERIC_NONCE_KEY}) OVER (PARTITION BY game, server_seed, client_seed ORDER BY round_timestamp, id) AS prev
        FROM rounds WHERE game IN ('keno','mines') AND round_timestamp IS NOT NULL AND nonce <> '' AND nonce NOT GLOB '*[^0-9]*'
      ) WHERE prev IS NOT NULL AND nn < prev GROUP BY game, server_seed, client_seed`,
   )) {

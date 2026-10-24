@@ -1,12 +1,14 @@
 import type { StoredRound } from "../../../shared/src/contracts.js";
+import { ALGORITHM_VERSIONS } from "../../../shared/src/contracts.js";
 import { APP_VERSION } from "../verification/engine.js";
+import { LIMITATIONS } from "./reports.js";
 
 /**
  * Generates a self-contained Node.js script that re-derives one round's outcome without the Lab.
  * The algorithm code embedded below is a plain transcription of the published reference code;
  * the round data is embedded as a JSON literal (never as code), so seed contents cannot inject code.
  */
-const PRELUDE = `import { createHmac } from "node:crypto";`;
+const PRELUDE = `import { createHash, createHmac } from "node:crypto";`;
 
 const CRASH = `
 function crash(serverSeed, publicSeed) {
@@ -79,6 +81,8 @@ export function standaloneScript(r: StoredRound): string {
     inputs,
     recorded: r.recorded,
     labCalculated: r.calculated,
+    labStatuses: { outcome: r.outcomeStatus, commitment: r.commitmentStatus, timing: r.timingStatus, overall: r.overallStatus },
+    limitations: LIMITATIONS,
   };
   const parts: string[] = [
     "#!/usr/bin/env node",
@@ -93,6 +97,21 @@ export function standaloneScript(r: StoredRound): string {
   ];
   const same = "const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);\nconst sameSet = (a, b) => a.length === b.length && same([...a].sort((x, y) => x - y), [...b].sort((x, y) => x - y));";
   parts.push(same);
+
+  // Nothing to reproduce: the Lab rejected the inputs, or the record names a version it does not implement.
+  // (Never fall back to another version: the version must come from the record.)
+  const versioned = r.game === "keno" || r.game === "mines";
+  const unsupported = versioned && !(ALGORITHM_VERSIONS as readonly string[]).includes(v);
+  if (unsupported || r.outcomeStatus === "invalid_input" || r.outcomeStatus === "unsupported_version") {
+    parts.push(
+      `console.error(${JSON.stringify(
+        unsupported
+          ? `Algorithm version ${JSON.stringify(v)} is not implemented, so this round cannot be reproduced. The version is taken from the record and is never substituted.`
+          : "The Lab could not reconstruct this record (invalid input), so there is nothing to reproduce.",
+      )});\nprocess.exit(1);\n`,
+    );
+    return parts.join("\n");
+  }
 
   switch (r.game) {
     case "crash":
@@ -131,7 +150,17 @@ const matchesRecorded = ROUND.recorded?.mines == null ? null : sameSet(ROUND.rec
     default:
       parts.push('console.error("This record has no reconstructable game."); process.exit(1);');
   }
-  parts.push(`console.log(JSON.stringify({ round: ROUND.roundId, game: ROUND.game, algorithm: ROUND.algorithmVersion, calculated, agreesWithLab, matchesRecorded }, null, 2));
+  parts.push(`// Candidate only: Solpump's commitment construction is unconfirmed, and equality says nothing about WHEN it was published.
+const commitmentCandidate = typeof I.commitment === "string" && I.commitment
+  ? { supplied: I.commitment, sha256OfServerSeed: createHash("sha256").update(I.serverSeed, "utf8").digest("hex") }
+  : null;
+if (commitmentCandidate) commitmentCandidate.equalsSupplied = commitmentCandidate.sha256OfServerSeed === I.commitment.trim().toLowerCase();
+console.log(JSON.stringify({
+  round: ROUND.roundId, game: ROUND.game, algorithm: ROUND.algorithmVersion, calculated, agreesWithLab, matchesRecorded,
+  commitmentCandidate, labStatuses: ROUND.labStatuses,
+  meaning: "matchesRecorded = the recorded outcome is consistent with the revealed seeds under this algorithm version. It does not prove the seeds were committed before the round.",
+  limitations: ROUND.limitations,
+}, null, 2));
 process.exit(agreesWithLab ? 0 : 1);
 `);
   return parts.join("\n");

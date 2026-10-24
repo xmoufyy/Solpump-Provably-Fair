@@ -109,7 +109,7 @@ test("History filters by outcome and the search treats % literally", async ({ pa
   await page.getByTestId("history-outcome").selectOption("mismatch");
   await expect(page.getByTestId("history-table")).toContainText("e2e-mismatch");
   await page.getByTestId("history-search").fill("%");
-  await expect(page.getByTestId("history-total")).toHaveText("0 records");
+  await expect(page.getByTestId("history-total")).toHaveText("0 records (filtered)");
 });
 
 test("Seed Sessions groups rounds by seed pair", async ({ page }) => {

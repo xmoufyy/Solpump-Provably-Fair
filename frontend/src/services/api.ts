@@ -10,6 +10,7 @@ import type {
 } from "@shared/contracts";
 
 export {
+  EVIDENCE_EXPLANATIONS,
   OVERALL_EXPLANATIONS,
   STATUS_LABELS,
   VERSION_LABELS,

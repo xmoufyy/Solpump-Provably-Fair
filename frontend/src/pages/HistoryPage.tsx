@@ -8,9 +8,40 @@ const PAGE = 50;
 const OVERALL = ["verified_sufficient_evidence", "match_commitment_unproven", "reconstructed_only", "mismatch", "commitment_mismatch", "incomplete", "unsupported"];
 const OUTCOMES = ["match", "mismatch", "reconstructed", "missing_comparison", "invalid_input", "unsupported_version"];
 
+const FILTER_KEYS = ["game", "status", "outcome", "batch", "q"] as const;
+const VIEW_KEY = "sfl.history.view";
+
+/**
+ * The list view (filters + page) lives in the URL, so it survives opening a record, reloading and
+ * bookmarking. Visiting plain "#/history" (e.g. from the navigation) restores the last view of this tab.
+ * sessionStorage is a convenience only: every access is guarded and the page works without it.
+ */
+function initialView(params: URLSearchParams, hasRecord: boolean): URLSearchParams {
+  if (FILTER_KEYS.some((k) => params.get(k)) || params.get("page") || hasRecord) return params;
+  try {
+    return new URLSearchParams(sessionStorage.getItem(VIEW_KEY) ?? "");
+  } catch {
+    return params;
+  }
+}
+
+function rememberView(filter: RoundFilter, page: number, openId: number | null) {
+  const q = new URLSearchParams();
+  for (const k of FILTER_KEYS) if (filter[k]) q.set(k, String(filter[k]));
+  if (page) q.set("page", String(page + 1));
+  const query = q.toString();
+  window.history.replaceState(null, "", `#/history${openId !== null ? `/${openId}` : ""}${query ? `?${query}` : ""}`);
+  try {
+    sessionStorage.setItem(VIEW_KEY, query);
+  } catch {
+    /* storage unavailable: the URL still carries the view */
+  }
+}
+
 export function HistoryPage({ initialId, params }: { initialId?: number; params: URLSearchParams }) {
-  const [filter, setFilter] = useState<RoundFilter>({ game: params.get("game") ?? "", status: params.get("status") ?? "", outcome: params.get("outcome") ?? "", batch: params.get("batch") ?? "", q: "" });
-  const [page, setPage] = useState(0);
+  const [view] = useState(() => initialView(params, initialId !== undefined));
+  const [filter, setFilter] = useState<RoundFilter>(() => Object.fromEntries(FILTER_KEYS.map((k) => [k, view.get(k) ?? ""])) as RoundFilter);
+  const [page, setPage] = useState(() => Math.max(0, (Number(view.get("page")) || 1) - 1));
   const [data, setData] = useState<{ total: number; rounds: RoundSummary[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [openId, setOpenId] = useState<number | null>(initialId ?? null);
@@ -28,7 +59,10 @@ export function HistoryPage({ initialId, params }: { initialId?: number; params:
     return () => (clearTimeout(t), ctrl.abort());
   }, [filter, page, reload]);
 
-  const set = (k: keyof RoundFilter) => (v: string) => (setFilter({ ...filter, [k]: v }), setPage(0));
+  useEffect(() => rememberView(filter, page, openId), [filter, page, openId]);
+
+  const set = (k: keyof RoundFilter) => (v: string) => (setFilter((f) => ({ ...f, [k]: v })), setPage(0));
+  const filtered = FILTER_KEYS.some((k) => filter[k]);
 
   return (
     <div>
@@ -59,7 +93,12 @@ export function HistoryPage({ initialId, params }: { initialId?: number; params:
                 import {filter.batch.slice(0, 8)}… ✕
               </button>
             )}
-            <span data-testid="history-total">{data?.total ?? 0} records</span>
+            {filtered && (
+              <Button size="sm" variant="ghost" onClick={() => (setFilter(Object.fromEntries(FILTER_KEYS.map((k) => [k, ""])) as RoundFilter), setPage(0))} data-testid="history-clear">
+                <X className="h-3.5 w-3.5" aria-hidden /> Clear filters
+              </Button>
+            )}
+            <span data-testid="history-total" aria-live="polite">{data ? `${data.total} records${filtered ? " (filtered)" : ""}` : "Loading…"}</span>
           </div>
         </CardHeader>
         <CardContent className="overflow-x-auto p-0 scrollbar-thin">

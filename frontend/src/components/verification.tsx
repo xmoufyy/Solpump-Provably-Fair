@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, ChevronDown, Copy, FileSearch, HelpCircle, Info, Save, ShieldQuestion, XCircle } from "lucide-react";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, FieldError, Input, Label } from "@/components/ui";
-import { OVERALL_EXPLANATIONS, STATUS_LABELS, statusTone, type ComparisonRow, type TraceStep, type VerificationResult } from "@/services/api";
-import { cn } from "@/lib/utils";
+import { EVIDENCE_EXPLANATIONS, OVERALL_EXPLANATIONS, STATUS_LABELS, statusTone, type ComparisonRow, type TraceStep, type VerificationResult } from "@/services/api";
+import { cn, seedHazards } from "@/lib/utils";
 
 export function StatusBadge({ status, className }: { status: string; className?: string }) {
   const tone = statusTone(status);
@@ -97,12 +97,25 @@ export function StatusPanel({ result, currentAssessment }: { result: Verificatio
 }
 
 function StatusCell({ title, status, lines, testId }: { title: string; status: string; lines: string[]; testId?: string }) {
+  const meaning = EVIDENCE_EXPLANATIONS[status as keyof typeof EVIDENCE_EXPLANATIONS];
   return (
     <div className="rounded-xl border border-line bg-panel-2/60 p-3">
       <div className="mb-2 text-xs uppercase tracking-wider text-muted">{title}</div>
       <div data-testid={testId}>
         <StatusBadge status={status} />
       </div>
+      {meaning && (
+        <dl className="mt-2 space-y-1 text-xs" data-testid={testId ? `${testId}-meaning` : undefined}>
+          <dt className="sr-only">What this shows</dt>
+          <dd className="text-fg/90">{meaning.shows}</dd>
+          {meaning.missing && (
+            <>
+              <dt className="font-medium text-warn">Evidence still needed</dt>
+              <dd className="text-muted">{meaning.missing}</dd>
+            </>
+          )}
+        </dl>
+      )}
       <ul className="mt-2 space-y-1 text-xs text-muted">
         {lines.filter(Boolean).map((l, i) => (
           <li key={i}>{l}</li>
@@ -115,28 +128,43 @@ function StatusCell({ title, status, lines, testId }: { title: string; status: s
 export function TraceView({ steps, regenerated }: { steps: TraceStep[]; regenerated?: boolean }) {
   const [open, setOpen] = useState(true);
   const [filter, setFilter] = useState("");
-  const sections = useMemo(() => {
+  const [copy, setCopy] = useState<{ state: "idle" | "copied" | "failed"; count: number }>({ state: "idle", count: 0 });
+  const shown = useMemo(() => {
     const f = filter.toLowerCase();
-    const m = new Map<string, TraceStep[]>();
-    for (const s of steps) {
-      if (f && !`${s.section} ${s.label} ${s.value}`.toLowerCase().includes(f)) continue;
-      m.set(s.section, [...(m.get(s.section) ?? []), s]);
-    }
-    return [...m.entries()];
+    return f ? steps.filter((s) => `${s.section} ${s.label} ${s.value}`.toLowerCase().includes(f)) : steps;
   }, [steps, filter]);
+  // Copies what is shown (the filtered steps). The result is announced; a blocked clipboard is reported, not ignored.
+  const copyJson = async () => {
+    try {
+      if (!navigator.clipboard) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(JSON.stringify(shown, null, 2));
+      setCopy({ state: "copied", count: shown.length });
+    } catch {
+      setCopy({ state: "failed", count: 0 });
+    }
+    window.setTimeout(() => setCopy((c) => ({ ...c, state: "idle" })), 4000);
+  };
+  const sections = useMemo(() => {
+    const m = new Map<string, TraceStep[]>();
+    for (const s of shown) m.set(s.section, [...(m.get(s.section) ?? []), s]);
+    return [...m.entries()];
+  }, [shown]);
   if (!steps.length) return null;
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex-wrap gap-2">
         <CardTitle className="flex items-center gap-2">
           <FileSearch className="h-4 w-4 text-accent-2" aria-hidden /> Cryptographic trace
           <span className="font-normal text-muted">({steps.length} steps{regenerated ? ", regenerated from stored inputs" : ""})</span>
         </CardTitle>
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1">
           <Input aria-label="Filter trace" placeholder="filter…" className="h-8 w-36 font-sans text-xs" value={filter} onChange={(e) => setFilter(e.target.value)} />
-          <Button variant="ghost" size="sm" onClick={() => navigator.clipboard?.writeText(JSON.stringify(steps, null, 2))}>
-            <Copy className="h-3.5 w-3.5" aria-hidden /> Copy JSON
+          <Button variant="ghost" size="sm" onClick={copyJson} data-testid="trace-copy">
+            <Copy className="h-3.5 w-3.5" aria-hidden /> Copy JSON{filter ? ` (${shown.length} shown)` : ""}
           </Button>
+          <span role="status" className={cn("text-xs", copy.state === "failed" ? "text-bad" : "text-ok")} data-testid="trace-copy-status">
+            {copy.state === "copied" ? `Copied ${copy.count} step${copy.count === 1 ? "" : "s"}` : copy.state === "failed" ? "Copy failed: clipboard blocked. Select the text instead." : ""}
+          </span>
           <Button variant="ghost" size="sm" onClick={() => setOpen(!open)} aria-expanded={open} aria-label={open ? "Collapse trace" : "Expand trace"}>
             <ChevronDown className={cn("h-4 w-4 transition-transform", !open && "-rotate-90")} aria-hidden />
           </Button>
@@ -193,8 +221,9 @@ export function SeedFields({
   clientLabel?: string;
 }) {
   const set = (k: keyof SeedState) => (e: React.ChangeEvent<HTMLInputElement>) => onChange({ ...value, [k]: e.target.value });
-  const ws = (s: string) => s !== s.trim();
-  const field = (id: keyof SeedState, label: string, testId: string, opts: { placeholder?: string; warnWs?: boolean } = {}) => (
+  const field = (id: keyof SeedState, label: string, testId: string, opts: { placeholder?: string; warnWs?: boolean } = {}) => {
+    const hazards = opts.warnWs ? seedHazards(value[id]) : [];
+    return (
     <div>
       <Label htmlFor={id}>{label}</Label>
       <Input
@@ -208,15 +237,21 @@ export function SeedFields({
         aria-describedby={errors[id] ? `${id}-error` : undefined}
       />
       <FieldError id={`${id}-error`}>{errors[id]}</FieldError>
-      {opts.warnWs && ws(value[id]) && <p className="mt-1 text-xs text-warn">Contains leading/trailing whitespace - it will be hashed exactly as typed.</p>}
+      {hazards.length > 0 && (
+        <p className="mt-1 text-xs text-warn" data-testid={`${testId}-warning`}>
+          <AlertTriangle className="mr-1 inline h-3 w-3" aria-hidden />
+          Contains {hazards.join("; ")}. It is used exactly as typed; remove it only if Solpump's value does not contain it.
+        </p>
+      )}
     </div>
-  );
+    );
+  };
   return (
     <div className="space-y-3">
       {field("serverSeed", "Server Seed (revealed)", "server-seed", { placeholder: "revealed server seed", warnWs: true })}
       {field("clientSeed", clientLabel, "client-seed", { warnWs: true })}
-      {withNonce && field("nonce", "Nonce", "nonce")}
-      <div className="grid grid-cols-2 gap-3">
+      {withNonce && field("nonce", "Nonce", "nonce", { warnWs: true })}
+      <div className="grid gap-3 sm:grid-cols-2">
         {field("roundId", "Round ID (optional)", "round-id")}
         {field("commitment", "Commitment (optional)", "commitment", { placeholder: "server seed hash" })}
       </div>
@@ -244,7 +279,22 @@ export function errorMap(result: VerificationResult | null): Record<string, stri
   return out;
 }
 
-export function VerifyBar({ onRun, onSave, busy, saved, error }: { onRun: () => void; onSave?: () => void; busy: boolean; saved: number | null; error: string | null }) {
+export function VerifyBar({
+  onRun,
+  onSave,
+  busy,
+  saved,
+  error,
+  stale = false,
+}: {
+  onRun: () => void;
+  onSave?: () => void;
+  busy: boolean;
+  saved: number | null;
+  error: string | null;
+  /** inputs changed since the run that produced `saved`: the saved record no longer describes them */
+  stale?: boolean;
+}) {
   return (
     <div className="space-y-2">
       <div className="flex gap-2">
@@ -259,8 +309,10 @@ export function VerifyBar({ onRun, onSave, busy, saved, error }: { onRun: () => 
       </div>
       <div aria-live="polite">
         {saved !== null && (
-          <p className="text-xs text-ok">
-            Saved to history as <a className="underline" href={`#/history/${saved}`}>record #{saved}</a>.
+          <p className={cn("text-xs", stale ? "text-muted" : "text-ok")}>
+            {stale ? "The previous inputs were saved as " : "Saved to history as "}
+            <a className="underline" href={`#/history/${saved}`}>record #{saved}</a>
+            {stale ? "; the current inputs are not saved." : "."}
           </p>
         )}
         {error && <p className="text-xs text-bad" role="alert">{error}</p>}

@@ -88,7 +88,8 @@ describe("API integration", () => {
     const stats = (await ctx.app.inject({ url: "/api/stats" })).json();
     expect(stats.metrics.mismatches).toBeGreaterThanOrEqual(1);
     const integ = (await ctx.app.inject({ url: "/api/integrity" })).json();
-    expect(integ.findings.some((f: any) => f.check === "seed_pair_reuse")).toBe(true);
+    // c1 (1.25x) and c2 (9.99x) share one Crash seed pair: two different results cannot both be true
+    expect(integ.findings.find((f: any) => f.check.startsWith("seed_pair_reuse"))).toMatchObject({ check: "seed_pair_reuse_conflicting_outcomes", kind: "contradiction" });
     const { rounds } = (await ctx.app.inject({ url: "/api/rounds?limit=1" })).json();
     const rv = (await ctx.app.inject({ method: "POST", url: `/api/rounds/${rounds[0].id}/reverify` })).json();
     expect(rv.reproduced).toBe(true);

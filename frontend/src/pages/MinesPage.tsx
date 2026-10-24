@@ -69,7 +69,7 @@ export function MinesPage() {
         title="Mines Verification"
         subtitle="Reconstructs mine placement from serverSeed:clientSeed:nonce. Difficulty is just the grid size plus mine count. Click tiles to mark the ones you originally revealed."
       />
-      <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[360px_1fr]">
         <Card>
           <CardContent className="space-y-5">
             <div>
@@ -158,7 +158,7 @@ export function MinesPage() {
                 </div>
               </div>
             </div>
-            <VerifyBar onRun={() => !reported.error && !mineError && v.run(input)} onSave={() => !reported.error && !mineError && v.run(input, true)} busy={v.busy} saved={v.saved} error={v.error} />
+            <VerifyBar onRun={() => !reported.error && !mineError && v.run(input)} onSave={() => !reported.error && !mineError && v.run(input, true)} busy={v.busy} saved={v.saved} error={v.error} stale={stale} />
           </CardContent>
         </Card>
 

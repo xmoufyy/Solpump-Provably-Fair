@@ -31,7 +31,7 @@ export function OnChainPage() {
         title="On-Chain Evidence"
         subtitle="Read-only Solana transaction lookup. Solpump's program IDs and event formats have not been independently confirmed, so this tool does not decode Solpump-specific data. It shows generic, independently timestamped evidence and checks whether values you supply appear in the transaction. No wallet or key is ever used."
       />
-      <div className="grid gap-6 xl:grid-cols-[420px_1fr]">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[420px_1fr]">
         <Card>
           <CardContent className="space-y-4">
             <div>

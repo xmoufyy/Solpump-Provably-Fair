@@ -95,7 +95,7 @@ export function BatchPage() {
         title="Batch Verification"
         subtitle="Import recorded Solpump rounds (CSV, JSON, JSONL or pasted). Rows are verified in the background in small transactions — you can keep using the app, pause or cancel. Keno and Mines rows must state their algorithm version; it is never guessed."
       />
-      <div className="grid gap-6 xl:grid-cols-[1fr_420px]">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_420px]">
         <Card>
           <CardContent className="space-y-4">
             <div className="flex flex-wrap items-end gap-4">

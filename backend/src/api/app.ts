@@ -6,6 +6,7 @@ import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { z } from "zod";
 import { FairnessDb, type RoundFilter } from "../database/db.js";
 import { verifyRound, outcomeKey, APP_VERSION, type VerifyOptions } from "../verification/engine.js";
+import { boundedArray } from "../verification/schemas.js";
 import { ImportJobs } from "../imports/jobs.js";
 import { runIntegrityAudit } from "../auditing/integrity.js";
 import { csvLines, toHtml, toJson, toPdf } from "../exports/reports.js";
@@ -21,6 +22,8 @@ import {
   KENO_DIFFICULTIES,
   LIMITS,
   MINES_GRID_SIZES,
+  type CommitmentScheme,
+  type CommitmentStatus,
   type StoredRound,
 } from "../../../shared/src/contracts.js";
 
@@ -50,7 +53,9 @@ const hostname = (hostHeader: string) => {
 
 export async function buildApp(opts: AppOptions = {}) {
   const db = opts.db ?? new FairnessDb();
-  const app = Fastify({ logger: opts.logger ?? false, bodyLimit: LIMITS.importBytes + 1024 * 1024 });
+  // Only imports carry large bodies; every other route is held to a few MB (the HMAC inspector's largest legal
+  // request is ~2.2 MB), so an oversized body is refused before it is parsed or validated.
+  const app = Fastify({ logger: opts.logger ?? false, bodyLimit: LIMITS.requestBytes });
   const allowedHosts = new Set([...LOOPBACK_HOSTS, ...(opts.allowedHosts ?? []).map((h) => h.toLowerCase())]);
 
   // ---------------------------------------------------------------- request guards
@@ -107,6 +112,15 @@ export async function buildApp(opts: AppOptions = {}) {
     if (!r.success) throw new HttpError(400, r.error.issues.map((i) => `${i.path.join(".") || "request"}: ${i.message}`).join("; "));
     return r.data;
   };
+  /**
+   * A record is re-audited under the mode it was created with: a manual entry without a reported outcome is a
+   * pure reconstruction, while an imported record claims to be historical, so a missing outcome is a gap.
+   * Re-auditing everything as "import" turned every saved manual reconstruction into "missing comparison".
+   */
+  const auditMode = (r: { importBatchId: string | null }) => (r.importBatchId ? "import" : "manual");
+  /** The commitment scheme a stored commitment status was produced under (null: no commitment was supplied). */
+  const schemeBehind = (s: CommitmentStatus): CommitmentScheme | null =>
+    s === "verified" || s === "mismatch" ? "sha256_utf8_hex" : s === "scheme_unconfirmed" ? "unconfirmed" : null;
   const idParam = (req: FastifyRequest) => parse(z.object({ id: z.coerce.number().int().positive() }), req.params).id;
 
   /**
@@ -116,14 +130,23 @@ export async function buildApp(opts: AppOptions = {}) {
    */
   const hydrate = (r: StoredRound): StoredRound => {
     if (["invalid_input", "unsupported_version"].includes(r.outcomeStatus)) return r;
-    const fresh = verifyRound(r.result.inputs, verifyOpts("import", true));
+    const mode = auditMode(r);
+    const fresh = verifyRound(r.result.inputs, verifyOpts(mode, true));
     const reproduced = outcomeKey(r.game, fresh.calculated) === outcomeKey(r.game, r.calculated);
     const differs = fresh.overall !== r.overallStatus || fresh.outcome.status !== r.outcomeStatus || fresh.commitment.status !== r.commitmentStatus;
     const currentAssessment = differs ? { overall: fresh.overall, outcome: fresh.outcome.status, commitment: fresh.commitment.status } : null;
     const needsTrace = r.result.trace.length === 0;
+    // Compact records keep only statuses, so their notes and comparison rows are rebuilt. They must be rebuilt
+    // under the commitment scheme that produced the stored status, not today's setting: otherwise a record stored
+    // as "scheme unconfirmed" would show a "commitment mismatch" row next to its stored badge.
+    const storedScheme = schemeBehind(r.commitmentStatus);
+    const asStored =
+      !r.compact || storedScheme === null || storedScheme === db.getSettings().commitmentScheme
+        ? fresh
+        : verifyRound(r.result.inputs, { commitmentScheme: storedScheme, mode, trace: true });
     const result = r.compact
       ? {
-          ...fresh,
+          ...asStored,
           // authoritative stored facts
           outcome: r.result.outcome,
           overall: r.overallStatus,
@@ -132,8 +155,8 @@ export async function buildApp(opts: AppOptions = {}) {
           appVersion: r.result.appVersion,
           reported: r.recorded,
           calculated: r.calculated,
-          commitment: { ...fresh.commitment, status: r.commitmentStatus },
-          timing: { ...fresh.timing, status: r.timingStatus },
+          commitment: { ...asStored.commitment, status: r.commitmentStatus },
+          timing: { ...asStored.timing, status: r.timingStatus },
         }
       : { ...r.result, trace: needsTrace ? fresh.trace : r.result.trace, comparisons: r.result.comparisons.length ? r.result.comparisons : fresh.comparisons };
     return { ...r, result: result as StoredRound["result"], traceRegenerated: needsTrace, reproduced, currentAssessment };
@@ -174,10 +197,7 @@ export async function buildApp(opts: AppOptions = {}) {
   const hmacSchema = z.object({
     key: z.string().max(LIMITS.hmacPartLength),
     keyEncoding: z.enum(["utf8", "hex"]).default("utf8"),
-    parts: z
-      .array(z.object({ value: z.string().max(LIMITS.hmacPartLength), encoding: z.enum(["utf8", "hex", "uint32be"]).default("utf8") }))
-      .max(LIMITS.hmacParts)
-      .default([]),
+    parts: boundedArray(z.object({ value: z.string().max(LIMITS.hmacPartLength), encoding: z.enum(["utf8", "hex", "uint32be"]).default("utf8") }), LIMITS.hmacParts).default([]),
   });
   app.post("/api/tools/hmac", async (req) => {
     const p = parse(hmacSchema, req.body);
@@ -201,7 +221,7 @@ export async function buildApp(opts: AppOptions = {}) {
   });
 
   app.post("/api/tools/transcript", async (req) => {
-    const p = parse(z.object({ parts: z.array(z.string().max(LIMITS.hmacPartLength)).max(LIMITS.hmacParts) }), req.body);
+    const p = parse(z.object({ parts: boundedArray(z.string().max(LIMITS.hmacPartLength), LIMITS.hmacParts) }), req.body);
     return { hex: buildTranscript(p.parts).toString("hex") };
   });
 
@@ -238,7 +258,7 @@ export async function buildApp(opts: AppOptions = {}) {
     const { update } = parse(z.object({ update: z.enum(["0", "1"]).optional() }), req.query);
     const r = db.getRound(id);
     if (!r) throw new HttpError(404, "Not found");
-    const fresh = verifyRound(r.result.inputs, verifyOpts("import"));
+    const fresh = verifyRound(r.result.inputs, verifyOpts(auditMode(r)));
     const reproduced = outcomeKey(r.game, fresh.calculated) === outcomeKey(r.game, r.calculated);
     if (update === "1") db.updateRoundResult(id, fresh);
     return { reproduced, updated: update === "1", fresh };
@@ -255,7 +275,7 @@ export async function buildApp(opts: AppOptions = {}) {
       try {
         for (const id of ids.slice(i, i + 500)) {
           const r = db.getRound(id)!;
-          const fresh = verifyRound(r.result.inputs, verifyOpts("import", false));
+          const fresh = verifyRound(r.result.inputs, verifyOpts(auditMode(r), false));
           if (outcomeKey(r.game, fresh.calculated) === outcomeKey(r.game, r.calculated)) reproduced++;
           if (fresh.overall !== r.overallStatus || fresh.outcome.status !== r.outcomeStatus || fresh.commitment.status !== r.commitmentStatus) {
             db.updateRoundResult(id, fresh);
@@ -280,7 +300,7 @@ export async function buildApp(opts: AppOptions = {}) {
   });
 
   // ---------------------------------------------------------------- imports
-  app.post("/api/import", async (req) => {
+  app.post("/api/import", { bodyLimit: LIMITS.importBytes + 1024 * 1024 }, async (req) => {
     const body = parse(
       z.object({
         text: z.string().min(1, "No data supplied").max(LIMITS.importBytes, `Import is larger than ${LIMITS.importBytes / 1024 / 1024} MB; split the file`),
@@ -381,7 +401,7 @@ export async function buildApp(opts: AppOptions = {}) {
   });
 
   app.post("/api/chain/tx", async (req) => {
-    const p = parse(z.object({ signature: z.string().max(128), needles: z.array(z.string().max(1024)).max(20).default([]) }), req.body);
+    const p = parse(z.object({ signature: z.string().max(128), needles: boundedArray(z.string().max(1024), 20).default([]) }), req.body);
     try {
       return await fetchTransactionEvidence(db.getSettings().solanaRpcUrl, p.signature.trim(), p.needles);
     } catch (e) {
