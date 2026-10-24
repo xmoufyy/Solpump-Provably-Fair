@@ -1,5 +1,4 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
-import fastifyStatic from "@fastify/static";
 import { existsSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
@@ -501,6 +500,9 @@ export async function buildApp(opts: AppOptions = {}) {
   });
 
   if (opts.staticDir && existsSync(opts.staticDir)) {
+    // Loaded only when this process serves the frontend itself (start.bat). On Vercel the CDN serves it, and
+    // @fastify/static require()s an ES-module dependency that Vercel's function runtime cannot load.
+    const { default: fastifyStatic } = await import("@fastify/static");
     await app.register(fastifyStatic, { root: opts.staticDir, prefix: "/", index: ["index.html"] });
     app.setNotFoundHandler((req, reply) => {
       if (req.url.startsWith("/api/")) return reply.code(404).send({ error: "Not found" });

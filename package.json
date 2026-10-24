@@ -23,7 +23,8 @@
     "bench": "npm run bench -w backend",
     "audit:all": "node scripts/audit-all.mjs",
     "build:api": "esbuild backend/src/vercel.ts --bundle --platform=node --target=node22 --format=esm --packages=external --sourcemap --outfile=backend/dist/vercel.mjs",
-    "build:vercel": "npm run build && npm run build:api"
+    "build:vercel": "npm run build && npm run build:api",
+    "check:vercel": "npm run build:api && node --no-experimental-require-module scripts/check-vercel-bundle.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
