@@ -98,12 +98,20 @@ export class FairnessDb {
 
   private constructor(readonly sql: Sql) {}
 
-  /** Opens (creating and migrating if needed) a database: a file path, ":memory:", or a remote libSQL URL. */
-  static async open(location: string | { url: string; authToken?: string } = databaseLocation()): Promise<FairnessDb> {
-    const { url, authToken } = typeof location === "string" ? { url: location, authToken: undefined } : location;
-    const isRemote = /^(libsql|https?|wss?):\/\//i.test(url);
-    if (!isRemote && url !== ":memory:") mkdirSync(dirname(url.replace(/^file:/, "")), { recursive: true });
-    const db = new FairnessDb(Sql.connect(url, authToken));
+  /**
+   * Opens (creating and migrating if needed) a database: a file path, ":memory:", a remote libSQL URL,
+   * or an existing connection (tests).
+   */
+  static async open(location: string | { url: string; authToken?: string } | Sql = databaseLocation()): Promise<FairnessDb> {
+    let sql: Sql;
+    if (location instanceof Sql) sql = location;
+    else {
+      const { url, authToken } = typeof location === "string" ? { url: location, authToken: undefined } : location;
+      const isRemote = /^(libsql|https?|wss?):\/\//i.test(url);
+      if (!isRemote && url !== ":memory:") mkdirSync(dirname(url.replace(/^file:/, "")), { recursive: true });
+      sql = Sql.connect(url, authToken);
+    }
+    const db = new FairnessDb(sql);
     if (db.sql.local) {
       // WAL + synchronous=NORMAL: never corrupts; an application crash loses nothing; an OS crash or power loss can
       // lose only the most recent commits. Per-commit fsync (FULL) made imports ~2x slower on Windows.
@@ -111,6 +119,7 @@ export class FairnessDb {
       // 64 MB page cache (default 2 MB): random fingerprint keys made index pages thrash past ~50k rows.
       await db.sql.exec("PRAGMA cache_size = -65536; PRAGMA temp_store = MEMORY;");
     }
+    await db.ensureVersionRecord();
     // base (v0) schema only for new or legacy files; later versions are reached through migrations
     if ((await db.schemaVersion()) === 0) await db.sql.exec(V0_SCHEMA);
     db.migration = await db.migrate();
@@ -125,8 +134,27 @@ export class FairnessDb {
     this.sql.close();
   }
 
+  /**
+   * The schema version lives in the schema_meta table: hosted libSQL (Turso) refuses to write
+   * PRAGMA user_version. Local files written by earlier versions recorded it only in user_version, which
+   * seeds the table once; local files keep user_version in step so older app versions still recognise them.
+   */
+  private async ensureVersionRecord() {
+    await this.sql.exec("CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)");
+    const legacy = this.sql.local ? Number((await this.sql.get<{ user_version: number }>("PRAGMA user_version"))?.user_version ?? 0) : 0;
+    await this.sql.run("INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', ?)", legacy);
+  }
+
   async schemaVersion(): Promise<number> {
-    return Number((await this.sql.get<{ user_version: number }>("PRAGMA user_version"))?.user_version ?? 0);
+    return Number((await this.sql.get<{ value: number }>("SELECT value FROM schema_meta WHERE key = 'schema_version'"))?.value ?? 0);
+  }
+
+  /** Statements recording `version`; batched with a migration so both apply together or not at all. */
+  private versionStatements(version: number): Statement[] {
+    return [
+      { sql: "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", args: [version] },
+      ...(this.sql.local ? [{ sql: `PRAGMA user_version = ${version}` }] : []),
+    ];
   }
 
   /**
@@ -144,7 +172,7 @@ export class FairnessDb {
     if (hasData && this.sql.file !== null) backup = await this.backup(`pre-v${SCHEMA_VERSION}`);
     for (const m of MIGRATIONS.filter((x) => x.version > from)) {
       try {
-        await this.sql.batch([...(await m.up(this.sql)), `PRAGMA user_version = ${m.version}`]);
+        await this.sql.batch([...(await m.up(this.sql)), ...this.versionStatements(m.version)]);
       } catch (e) {
         throw new Error(`Migration to v${m.version} failed and was rolled back${backup ? `; backup at ${backup}` : ""}: ${(e as Error).message}`);
       }
@@ -156,7 +184,7 @@ export class FairnessDb {
   async migrateDown(target: number) {
     const current = await this.schemaVersion();
     for (const m of [...MIGRATIONS].reverse().filter((x) => x.version > target && x.version <= current)) {
-      await this.sql.batch([...(await m.down(this.sql)), `PRAGMA user_version = ${m.version - 1}`]);
+      await this.sql.batch([...(await m.down(this.sql)), ...this.versionStatements(m.version - 1)]);
     }
   }
 

@@ -90,7 +90,7 @@ describe("migration of an authentic v1 database", () => {
   it("refuses to open a database from a newer schema", async () => {
     const p = join(tmp, "future.db");
     const db = await FairnessDb.open(p);
-    await db.sql.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+    await db.sql.run("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", SCHEMA_VERSION + 1);
     db.close();
     await expect(FairnessDb.open(p)).rejects.toThrow(/newer than this application/);
   });
