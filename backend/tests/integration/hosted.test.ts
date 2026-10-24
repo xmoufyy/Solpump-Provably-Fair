@@ -9,6 +9,8 @@ import { join } from "node:path";
 import { removeTempDir } from "./cleanup.js";
 import { buildApp, hostedHosts } from "../../src/api/app.js";
 import { FairnessDb } from "../../src/database/db.js";
+import { SCHEMA_VERSION } from "../../src/database/migrations.js";
+import { Sql } from "../../src/database/sql.js";
 import { issueSession, validSession, type AuthConfig } from "../../src/api/auth.js";
 
 const tmp = mkdtempSync(join(tmpdir(), "sfl-hosted-"));
@@ -124,5 +126,41 @@ describe("several server instances on one database", () => {
     const res = await a.inject({ method: "POST", url: "/api/backup" });
     expect(res.statusCode).toBe(501);
     expect(res.json().error).toMatch(/Turso/);
+  });
+});
+
+describe("hosted database restrictions (Turso)", () => {
+  /** A connection that behaves like Turso: not local, and every PRAGMA statement is refused. */
+  function tursoLike(): Sql {
+    const inner = Sql.connect(":memory:");
+    const refuse = (sql: unknown) => {
+      const text = typeof sql === "string" ? sql : (sql as { sql?: string })?.sql ?? "";
+      if (/^\s*PRAGMA\b/i.test(text) || /;\s*PRAGMA\b/i.test(text)) throw new Error(`SQL_PARSE_ERROR: SQL not allowed statement: ${text}`);
+    };
+    return new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === "local") return false;
+        if (prop === "file") return null;
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (prop === "batch") (args[0] as unknown[]).forEach(refuse);
+          else refuse(args[0]);
+          return value.apply(target, args);
+        };
+      },
+    });
+  }
+
+  it("creates and migrates the schema without any PRAGMA, and reopens at the current version", async () => {
+    const sql = tursoLike();
+    const db = await FairnessDb.open(sql);
+    expect(db.migration).toMatchObject({ from: 0, to: SCHEMA_VERSION, backup: null });
+    expect(await db.schemaVersion()).toBe(SCHEMA_VERSION);
+    const again = await FairnessDb.open(sql);
+    expect(again.migration).toBeNull();
+    const { app: a } = await app({ password: null, secret: "s", hosted: false }, again);
+    const { job } = (await a.inject({ method: "POST", url: "/api/import", payload: { text: "game,serverSeed,clientSeed\ncrash,a,b\n", format: "csv" } })).json();
+    expect(job).toMatchObject({ status: "completed", stored: 1 });
   });
 });
